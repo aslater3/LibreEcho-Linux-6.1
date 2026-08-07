@@ -1,0 +1,2 @@
+# The user-visible and vendor compatibility symbols live in the parent
+# drivers/misc/mediatek/Kconfig.

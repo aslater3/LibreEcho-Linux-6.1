@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+menu "LibreEcho Radar-Puffin ambient light sensors"
+
+config ALS_TSL2583
+	tristate "Vendor TAOS TSL2584TSV ambient light sensor"
+	depends on I2C
+	depends on IIO
+	help
+	  Port of the Radar-Puffin vendor TSL2580/TSL2581/TSL2583/
+	  TSL2584TSV driver. It preserves the vendor IIO sysfs ABI and
+	  supports the ams,tsl2584tsv DT compatible.
+
+config ALS_TSL2584_AUTOZERO
+	bool "Enable periodic autozero of AMS TSL2584TSV"
+	depends on ALS_TSL2583
+	help
+	  Run the vendor autozero sequence at the interval supplied by the
+	  autozero-period-ms DT property.
+
+config SENSORS_TSL2540
+	tristate "Vendor AMS TSL2540 ambient light sensor"
+	depends on I2C
+	help
+	  Port of the Radar-Puffin vendor TSL2540 driver. It preserves the
+	  vendor device sysfs ABI and supports the amstaos,tsl2540 DT
+	  compatible and calibration properties.
+
+config AMZN_AMS_ALS
+	bool "Vendor calibrated-lux sysfs ABI"
+	depends on ALS_TSL2583 || SENSORS_TSL2540
+	help
+	  Expose the vendor calibrated_lux and als_calibrated_lux sysfs
+	  attributes backed by the factory /idme/alscal data.
+
+config AMS_ADJUST_WITH_BASELINE
+	bool "Use factory baseline in AMS lux calculations"
+	depends on ALS_TSL2583 || SENSORS_TSL2540
+	help
+	  Adjust the vendor lux calculations with the factory calibration
+	  baseline from /idme/alscal.
+
+endmenu

@@ -1,0 +1,93 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+config MTK_MT8163_CONSYS
+	bool "MediaTek MT8163 integrated CONSYS connectivity"
+	depends on ARM && ARCH_MEDIATEK && OF && HAS_IOMEM
+	depends on NET && RFKILL
+	select CFG80211
+	select CRC32
+	select FW_LOADER
+	select ZLIB_DEFLATE
+	select WIRELESS
+	select WIRELESS_EXT
+	select WEXT_CORE
+	select WEXT_PROC
+	select WEXT_PRIV
+	help
+	  Build the legacy integrated MT8163 CONSYS/WMT, BTIF, Wi-Fi and
+	  Bluetooth stack.  This driver binds the byte-identical vendor
+	  "mediatek,mt8163-consys" device-tree node and retains the character
+	  device ABI used by the MT8163 v181 WMT and Bluetooth helpers.
+
+	  This is an isolated forward port of the vendor Linux 3.18 driver.
+	  It is intended only for MT8163 systems carrying that legacy ABI.
+
+config MTK_COMBO
+	bool
+	default y if MTK_MT8163_CONSYS
+
+config MTK_COMBO_CHIP_CONSYS_8163
+	bool
+	default y if MTK_MT8163_CONSYS
+
+config MTK_COMBO_CHIP
+	string
+	default "CONSYS_8163" if MTK_MT8163_CONSYS
+
+config MTK_PLATFORM
+	string
+	default "mt8163" if MTK_MT8163_CONSYS
+
+config ARCH_MTK_PROJECT
+	string
+	default "radar" if MTK_MT8163_CONSYS
+
+config MTK_BTIF
+	bool
+	default y if MTK_MT8163_CONSYS
+
+config MTK_COMBO_BT
+	bool
+	default y if MTK_MT8163_CONSYS
+
+config MTK_MT8163_BLUEZ_HCI
+	bool "MT8163 Bluetooth HCI bridge for BlueZ"
+	depends on BT && MTK_MT8163_CONSYS
+	default y if MTK_MT8163_CONSYS && BT
+	help
+	  Register the STP BT character device as a BlueZ HCI controller so
+	  Linux exposes /sys/class/bluetooth/hci0.  The legacy /dev/stpbt
+	  diagnostic interface is retained.  Without this symbol the BTIF
+	  transport initializes but no HCI controller is visible to userspace.
+
+config MTK_COMBO_WIFI
+	bool
+	default y if MTK_MT8163_CONSYS
+
+config MTK_WIFI_ANTENNA_SWITCH
+	bool "MT8163 manual Wi-Fi antenna switching"
+	depends on MTK_MT8163_CONSYS
+	default n
+	help
+	  Enable the Radar-Puffin stock WMT antenna/coexistence bootstrap,
+	  including the 0x81060010 antenna-selection register write.
+
+config MTK_WIFI_ANTENNA_SELECT
+	bool "MT8163 Wi-Fi antenna selection"
+	depends on MTK_WIFI_ANTENNA_SWITCH
+	default n
+	help
+	  Enable the vendor WLAN antenna-selection controls used by the
+	  stock Radar-Puffin configuration.
+
+config MTK_WAPI_SUPPORT
+	bool
+	default n
+
+config MTK_WIFI_MCC_SUPPORT
+	bool
+	default n
+
+config MTK_WIFI_PM_CONTROL
+	bool
+	default n

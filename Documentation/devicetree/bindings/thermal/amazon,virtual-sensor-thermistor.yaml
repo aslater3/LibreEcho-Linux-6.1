@@ -1,0 +1,69 @@
+# SPDX-License-Identifier: (GPL-2.0 OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/thermal/amazon,virtual-sensor-thermistor.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Amazon MT8163 virtual sensor thermistor
+
+maintainers:
+  - Andy Slater <aslater3@googlemail.com>
+
+description: |
+  IIO-backed Murata NCP15XH103F03RC thermistors used by Amazon MT8163
+  Radar-Puffin/Giza boards. The offset, alpha and weight properties retain
+  the parameters consumed by the vendor virtual thermal policy.
+
+properties:
+  compatible:
+    const: amazon,virtual_sensor_thermistor
+
+  io-channels:
+    maxItems: 1
+    description: MT8163 AUXADC input carrying the thermistor divider voltage.
+
+  aux_channel_num:
+    minimum: 0
+    maximum: 2
+    description: Legacy logical sensor index, distinct from the AUXADC input.
+
+  thermistor,offset:
+    $ref: /schemas/types.yaml#/definitions/uint32
+
+  thermistor,offset.sign:
+    enum:
+      - plus
+      - minus
+
+  thermistor,alpha:
+    $ref: /schemas/types.yaml#/definitions/uint32
+
+  thermistor,weight:
+    $ref: /schemas/types.yaml#/definitions/uint32
+
+  virtual-sensor-id:
+    $ref: /schemas/types.yaml#/definitions/uint32
+
+required:
+  - compatible
+  - io-channels
+  - aux_channel_num
+  - thermistor,offset
+  - thermistor,offset.sign
+  - thermistor,alpha
+  - thermistor,weight
+
+additionalProperties: false
+
+examples:
+  - |
+    thermistor {
+        compatible = "amazon,virtual_sensor_thermistor";
+        io-channels = <&auxadc 0>;
+        aux_channel_num = <0>;
+        thermistor,offset = <15000>;
+        thermistor,offset.sign = "plus";
+        thermistor,alpha = <15>;
+        thermistor,weight = <400>;
+    };
+...
