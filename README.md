@@ -1,22 +1,24 @@
 # LibreEcho Linux 6.1 for MT8163
 
-This repository is the standalone Linux 6.1 kernel source for LibreEcho MT8163
-Radar-Puffin/Giza targets. It is intentionally separate from the legacy
-`LibreEcho-Kernel` repository, which remains the Linux 3.18 tooling, recovery
-image builder, DTB tooling, and ARM32 userspace integration repository.
+This repository is the current standalone Linux 6.1 kernel source for LibreEcho
+MT8163 targets. It is intentionally separate from `LibreEcho-Kernel`, which
+owns ARM32 product tooling, initramfs, feature packaging, OTA verification, and
+the historical 3.18 compatibility tree.
 
 ## Provenance
 
 - Base kernel: Linux 6.1.178
 - Base commit: `dc5c83b7f5f83ea99aea5c771b1ec77458263a15`
-- Product branch: `libreecho/mt8163-6.1`
+- Product baseline: `main`
 - Upstream origin: `https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git`
-- Imported candidate state: existing dirty MT8163 port, audio closure, DT, Wi-Fi,
-  Bluetooth, LED, thermistor, privacy, and supporting platform changes.
+- Current PRD kernel baseline: `2aaa8bfae1cc7c9aed5afe0fbe9a8e6abcbc6872`
+- The public `main` branch is a clean source baseline. Post-baseline fixes are
+  developed on review branches until they are verified and merged.
 
-The first LibreEcho commit in this repository is an exact local import of the
-candidate state. It is not a claim that the tree is upstream-ready or that the
-current dirty candidate has passed a clean reproducible release build.
+The tree is not a claim that the MT8163 changes are upstream-ready. A clean
+kernel source baseline does not by itself constitute a complete boot image or
+stable OTA release; those require the paired product tooling and independent
+image verification.
 
 ## Production audio contract
 
