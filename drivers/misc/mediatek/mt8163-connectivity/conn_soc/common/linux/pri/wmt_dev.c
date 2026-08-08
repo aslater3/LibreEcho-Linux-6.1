@@ -267,6 +267,9 @@ static UINT8 gLpbkBuf[1024] = { 0 };
 static UINT32 gLpbkBufLog;	/* George LPBK debug */
 static INT32 gWmtInitDone;
 static wait_queue_head_t gWmtInitWq;
+static DEFINE_MUTEX(gWmtUserspaceInitLock);
+
+static INT32 wmt_userspace_init(void);
 
 P_WMT_PATCH_INFO pPatchInfo = NULL;
 UINT32 pAtchNum = 0;
@@ -2464,6 +2467,11 @@ static int WMT_open(struct inode *inode, struct file *file)
 	long ret;
 
 	WMT_INFO_FUNC("major %d minor %d (pid %d)\n", imajor(inode), iminor(inode), current->pid);
+	if (!gWmtInitDone) {
+		ret = wmt_userspace_init();
+		if (ret)
+			return ret;
+	}
 	ret = wait_event_timeout(gWmtInitWq, gWmtInitDone != 0, msecs_to_jiffies(WMT_DEV_INIT_TO_MS));
 	if (!ret) {
 		WMT_WARN_FUNC("wait_event_timeout (%d)ms,(%d)jiffies,return -EIO\n",
@@ -2603,45 +2611,12 @@ static int WMT_init(void)
 		goto error;
 	}
 #endif
-	ret = wmt_lib_init();
-	if (ret) {
-		WMT_ERR_FUNC("wmt_lib_init() fails (%d)\n", ret);
-		goto error;
-	}
-#if CFG_WMT_DBG_SUPPORT
-	wmt_dev_dbg_setup();
-#endif
-
-#if CFG_WMT_PROC_FOR_AEE
-	wmt_dev_proc_for_aee_setup();
-#endif
-
-	WMT_INFO_FUNC("wmt_dev register thermal cb\n");
-	wmt_lib_register_thermal_ctrl_cb(wmt_dev_tm_temp_query);
-
-	wmt_dev_bgw_desense_init();
-
-	gWmtInitDone = 1;
-	wake_up(&gWmtInitWq);
-
-	osal_sleepable_lock_init(&g_es_lr_lock);
-	INIT_WORK(&gPwrOnOffWork, wmt_pwr_on_off_handler);
-#ifdef CONFIG_EARLYSUSPEND
-	register_early_suspend(&wmt_early_suspend_handler);
-	WMT_INFO_FUNC("register_early_suspend finished\n");
-#else
-	wmt_fb_notifier.notifier_call = wmt_fb_notifier_callback;
-	ret = fb_register_client(&wmt_fb_notifier);
-	if (ret)
-		WMT_ERR_FUNC("wmt register fb_notifier failed! ret(%d)\n", ret);
-	else
-		WMT_INFO_FUNC("wmt register fb_notifier OK!\n");
-#endif
-	WMT_INFO_FUNC("success\n");
+	/* Defer firmware-dependent initialization until userspace has imported
+	 * the owner-local assets and explicitly opens /dev/stpwmt. */
+	WMT_INFO_FUNC("device registered; firmware initialization deferred\n");
 	return 0;
 
 error:
-	wmt_lib_deinit();
 #if CFG_WMT_DBG_SUPPORT
 	wmt_dev_dbg_remove();
 #endif
@@ -2667,6 +2642,51 @@ error:
 	return -1;
 }
 
+static INT32 wmt_userspace_init(void)
+{
+	INT32 ret = 0;
+
+	mutex_lock(&gWmtUserspaceInitLock);
+	if (gWmtInitDone)
+		goto out;
+
+	ret = wmt_lib_init();
+	if (ret) {
+		WMT_ERR_FUNC("wmt_lib_init() fails (%d)\n", ret);
+		wmt_lib_deinit();
+		goto out;
+	}
+#if CFG_WMT_DBG_SUPPORT
+	wmt_dev_dbg_setup();
+#endif
+#if CFG_WMT_PROC_FOR_AEE
+	wmt_dev_proc_for_aee_setup();
+#endif
+	WMT_INFO_FUNC("wmt_dev register thermal cb\n");
+	wmt_lib_register_thermal_ctrl_cb(wmt_dev_tm_temp_query);
+	wmt_dev_bgw_desense_init();
+	osal_sleepable_lock_init(&g_es_lr_lock);
+	INIT_WORK(&gPwrOnOffWork, wmt_pwr_on_off_handler);
+#ifdef CONFIG_EARLYSUSPEND
+	register_early_suspend(&wmt_early_suspend_handler);
+	WMT_INFO_FUNC("register_early_suspend finished\n");
+#else
+	wmt_fb_notifier.notifier_call = wmt_fb_notifier_callback;
+	ret = fb_register_client(&wmt_fb_notifier);
+	if (ret)
+		WMT_ERR_FUNC("wmt register fb_notifier failed! ret(%d)\n", ret);
+	else
+		WMT_INFO_FUNC("wmt register fb_notifier OK!\n");
+#endif
+	gWmtInitDone = 1;
+	wake_up(&gWmtInitWq);
+	WMT_INFO_FUNC("userspace-triggered firmware initialization success\n");
+
+out:
+	mutex_unlock(&gWmtUserspaceInitLock);
+	return ret;
+}
+
 static void WMT_exit(void)
 {
 	dev_t dev = MKDEV(gWmtMajor, 0);
@@ -2681,9 +2701,10 @@ static void WMT_exit(void)
 
 	wmt_dev_bgw_desense_deinit();
 
-	wmt_lib_register_thermal_ctrl_cb(NULL);
-
-	wmt_lib_deinit();
+	if (gWmtInitDone) {
+		wmt_lib_register_thermal_ctrl_cb(NULL);
+		wmt_lib_deinit();
+	}
 
 #if CFG_WMT_DBG_SUPPORT
 	wmt_dev_dbg_remove();
