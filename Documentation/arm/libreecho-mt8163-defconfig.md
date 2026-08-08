@@ -3,7 +3,7 @@
 `arch/arm/configs/mt8163_arm32_defconfig` is generated with Linux 6.1
 `make savedefconfig` from the accepted prepared build output
 `pipeline/work/kernel61-bind-build/.config`. It is not copied from the legacy
-Linux 3.18 `LibreEcho-Kernel` defconfig.
+Linux 3.18 `LibreEcho-Platform` defconfig.
 
 Regenerate from a verified Linux 6.1 build output with:
 
