@@ -1,7 +1,7 @@
 # LibreEcho Linux 6.1 for MT8163
 
 This repository is the current standalone Linux 6.1 kernel source for LibreEcho
-MT8163 targets. It is intentionally separate from `LibreEcho-Kernel`, which
+MT8163 targets. It is intentionally separate from `LibreEcho-Platform`, which
 owns ARM32 product tooling, initramfs, feature packaging, OTA verification, and
 the historical 3.18 compatibility tree.
 
@@ -43,7 +43,7 @@ The Radar-Puffin speaker path is:
 The shared audio engine renders one mono sample per frame and writes it to both
 PCM channels. This is not stereo programme audio; it is the transport required
 for the left/HPL tweeter and right/HPR woofer DAC paths. The userspace engine
-and packaging live in the separate `LibreEcho-Kernel` tooling repository.
+and packaging live in the separate `LibreEcho-Platform` tooling repository.
 
 ## Build boundary
 
