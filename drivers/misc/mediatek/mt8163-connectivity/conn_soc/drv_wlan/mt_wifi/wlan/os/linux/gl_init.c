@@ -2225,10 +2225,9 @@ static void createWirelessDevice(void)
 #ifdef CONFIG_PM
 	prWiphy->wowlan = &wlan_wowlan_support;
 #endif
-#ifdef CONFIG_CFG80211_WEXT
-	 /* <1.5> Use wireless extension to replace IOCTL */
-	prWiphy->wext = &wext_handler_def;
-#endif
+	/* Keep cfg80211's standard WEXT compatibility handlers on the wiphy.
+	 * MTK private handlers remain attached to the netdev below.
+	 */
 
 	if (wiphy_register(prWiphy) < 0) {
 		DBGLOG(INIT, ERROR, "wiphy_register error\n");
