@@ -60,6 +60,7 @@ jobs:
         with:
           name: libreecho-linux-arm32-${{ github.sha }}
           if-no-files-found: error
+          include-hidden-files: true
           retention-days: 14
           path: |
             ${{ runner.temp }}/kernel-out/arch/arm/boot/zImage
