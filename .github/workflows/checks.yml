@@ -1,0 +1,68 @@
+name: LibreEcho Linux checks
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  arm32_kernel:
+    name: ARM32 kernel build and regression checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out Linux source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Install ARM32 build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            bc binutils-arm-linux-gnueabihf bison build-essential flex \
+            gcc-arm-linux-gnueabihf libelf-dev libncurses-dev libssl-dev \
+            python3 rsync
+
+      - name: Run WEXT and cfg80211 regression contract
+        run: python3 drivers/misc/mediatek/mt8163-connectivity/test_wext_cfg80211_fallback.py
+
+      - name: Configure and build kernel
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/kernel-out"
+          make O="$out" ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- \
+            LD=arm-linux-gnueabihf-ld.bfd mt8163_arm32_defconfig
+          make O="$out" ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- \
+            LD=arm-linux-gnueabihf-ld.bfd olddefconfig
+          make -j2 O="$out" ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- \
+            LD=arm-linux-gnueabihf-ld.bfd zImage dtbs
+          test -s "$out/arch/arm/boot/zImage"
+          test -s "$out/arch/arm/boot/dts/libreecho-radar-puffin.dtb"
+          test -s "$out/System.map"
+          grep -qx 'CONFIG_CFG80211_WEXT=y' "$out/.config"
+          git diff --check
+
+      - name: Upload kernel build outputs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: libreecho-linux-arm32-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            ${{ runner.temp }}/kernel-out/arch/arm/boot/zImage
+            ${{ runner.temp }}/kernel-out/arch/arm/boot/dts/libreecho-radar-puffin.dtb
+            ${{ runner.temp }}/kernel-out/System.map
+            ${{ runner.temp }}/kernel-out/.config
