@@ -64,3 +64,35 @@ make O=/path/to/kernel-output ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- \
 The final LibreEcho pipeline remains the authority for the stock-v184 Android
 boot envelope, initramfs, feature payloads, signing, and image verification.
 This repository must not be used to flash a device directly.
+
+## MT8163 Bluetooth HCI contract
+
+The MT8163 Bluetooth bridge is built into the production kernel. The committed
+`mt8163_arm32_defconfig` explicitly enables the complete closure:
+
+```text
+CONFIG_BT=y
+CONFIG_BT_BREDR=y
+CONFIG_BT_LE=y
+CONFIG_MTK_BTIF=y
+CONFIG_MTK_COMBO_BT=y
+CONFIG_MTK_MT8163_BLUEZ_HCI=y
+```
+
+The bridge registers `hci0` before userspace WMT preparation is complete. It
+therefore cancels the automatic HCI setup work queued by `hci_register_dev()`
+and marks the controller for deferred setup; the first `SET_POWERED` management
+command is allowed through that narrow gate only after WMT has configured the
+BTIF transport. The normal HCI open/setup sequence then clears `HCI_SETUP` and
+populates the controller information. Without this exception, Linux rejects the
+first controller-indexed management command while the transport is deliberately
+waiting for userspace preparation.
+
+The source contract can be checked without hardware:
+
+```sh
+python3 -B tools/mt8163_bluetooth_contract_test.py
+```
+
+This static check does not replace live HCI controller-information, discovery,
+pairing, and connection acceptance on the target device.
