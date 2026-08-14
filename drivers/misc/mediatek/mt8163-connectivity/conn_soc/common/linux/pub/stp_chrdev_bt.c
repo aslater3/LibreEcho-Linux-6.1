@@ -276,6 +276,7 @@ static int mtk_bt_hci_init(void)
 
 	mtk_hci.hdev->bus = HCI_VIRTUAL;
 	mtk_hci.hdev->dev_type = HCI_PRIMARY;
+	set_bit(HCI_QUIRK_DEFERRED_SETUP, &mtk_hci.hdev->quirks);
 	/* The MT8163 BTIF firmware advertises extended LMP features but returns
 	 * a non-success status for Read Local Extended Features.  Those optional
 	 * pages are not needed for the BR/EDR transport used by this board. */

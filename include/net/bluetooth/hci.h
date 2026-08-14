@@ -325,6 +325,16 @@ enum {
 	 * to support it.
 	 */
 	HCI_QUIRK_BROKEN_SET_RPA_TIMEOUT,
+
+	/*
+	 * When this quirk is set, setup work is intentionally deferred until
+	 * userspace has completed transport-specific preparation.  The
+	 * management layer may submit SET_POWERED while HCI_SETUP remains set;
+	 * the normal HCI setup sequence then clears HCI_SETUP on success.
+	 *
+	 * This quirk must be set before hci_register_dev is called.
+	 */
+	HCI_QUIRK_DEFERRED_SETUP,
 };
 
 /* HCI device flags */
