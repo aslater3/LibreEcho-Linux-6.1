@@ -186,10 +186,10 @@ static void mt8163_musb_diag_work(struct work_struct *work)
 	musb_ep_select(musb->mregs, index);
 	spin_unlock_irqrestore(&musb->lock, flags);
 
-	dev_info(glue->dev,
-		 "MT8163 MUSB delayed diag: l1=%08x/%08x rx=%04x/%04x tx=%04x/%04x ep1-rxcsr=%04x rxcount=%04x txcsr=%04x\n",
-		 l1s, l1m, intrrx, intrrxe, intrtx, intrtxe,
-		 rxcsr, rxcount, txcsr);
+	dev_dbg(glue->dev,
+		"MT8163 MUSB delayed diag: l1=%08x/%08x rx=%04x/%04x tx=%04x/%04x ep1-rxcsr=%04x rxcount=%04x txcsr=%04x\n",
+		l1s, l1m, intrrx, intrrxe, intrtx, intrtxe,
+		rxcsr, rxcount, txcsr);
 }
 
 static int mtk_musb_clks_get(struct mtk_glue *glue)
@@ -299,7 +299,7 @@ static irqreturn_t generic_interrupt(int irq, void *__hci)
 	musb->int_tx = musb_clearw(musb->mregs, MUSB_INTRTX);
 
 	if (musb->int_rx || (musb->int_tx & ~BIT(0)))
-		dev_info_ratelimited(musb->controller,
+		dev_dbg_ratelimited(musb->controller,
 			"MT8163 MUSB IRQ diag: usb=%02x rx=%04x/%04x tx=%04x/%04x\n",
 			musb->int_usb, musb->int_rx,
 			musb_readw(musb->mregs, MUSB_INTRRXE),
@@ -331,6 +331,17 @@ static irqreturn_t mtk_musb_interrupt(int irq, void *dev_id)
 
 	if (l1_ints & (TX_INT_STATUS | RX_INT_STATUS | USBCOM_INT_STATUS))
 		retval = generic_interrupt(irq, musb);
+
+	/* Issue #8: keep a bounded diagnostic on genuine error paths.  An
+	 * interrupt was signalled through the MT8163 L1 status but no MUSB
+	 * handler claimed it; warn from this platform wrapper so the generic,
+	 * shared musb_interrupt() core stays free of platform-specific
+	 * diagnostics for the other glue drivers. */
+	if (retval == IRQ_NONE &&
+	    (l1_ints & (TX_INT_STATUS | RX_INT_STATUS | USBCOM_INT_STATUS)))
+		dev_warn_ratelimited(musb->controller,
+			"MT8163 MUSB unhandled IRQ: l1=%08x usb=%02x rx=%04x tx=%04x\n",
+			l1_ints, musb->int_usb, musb->int_rx, musb->int_tx);
 
 #if defined(CONFIG_USB_INVENTRA_DMA)
 	if (l1_ints & DMA_INT_STATUS)
