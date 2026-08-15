@@ -332,6 +332,17 @@ static irqreturn_t mtk_musb_interrupt(int irq, void *dev_id)
 	if (l1_ints & (TX_INT_STATUS | RX_INT_STATUS | USBCOM_INT_STATUS))
 		retval = generic_interrupt(irq, musb);
 
+	/* Issue #8: keep a bounded diagnostic on genuine error paths.  An
+	 * interrupt was signalled through the MT8163 L1 status but no MUSB
+	 * handler claimed it; warn from this platform wrapper so the generic,
+	 * shared musb_interrupt() core stays free of platform-specific
+	 * diagnostics for the other glue drivers. */
+	if (retval == IRQ_NONE &&
+	    (l1_ints & (TX_INT_STATUS | RX_INT_STATUS | USBCOM_INT_STATUS)))
+		dev_warn_ratelimited(musb->controller,
+			"MT8163 MUSB unhandled IRQ: l1=%08x usb=%02x rx=%04x tx=%04x\n",
+			l1_ints, musb->int_usb, musb->int_rx, musb->int_tx);
+
 #if defined(CONFIG_USB_INVENTRA_DMA)
 	if (l1_ints & DMA_INT_STATUS)
 		retval = dma_controller_irq(irq, musb->dma_controller);

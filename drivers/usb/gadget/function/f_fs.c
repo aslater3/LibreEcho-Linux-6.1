@@ -1144,6 +1144,8 @@ static ssize_t ffs_epfile_io(struct file *file, struct ffs_io_data *io_data)
 
 		ret = usb_ep_queue(ep->ep, req, GFP_ATOMIC);
 		if (ret) {
+			pr_warn_ratelimited("MT8163 FFS async queue failed: ep=%s ret=%d\n",
+					    ep->ep->name, ret);
 			io_data->req = NULL;
 			usb_ep_free_request(ep->ep, req);
 			goto error_lock;

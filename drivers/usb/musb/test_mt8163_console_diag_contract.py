@@ -11,8 +11,10 @@ This contract asserts:
 2. Every MT8163 USB diagnostic print site is at debug level
    (dev_dbg/pr_debug/dev_dbg_ratelimited/pr_debug_ratelimited), so the
    details remain available under CONFIG_DYNAMIC_DEBUG / debug builds.
-3. Genuine failure paths keep a bounded warn-level diagnostic:
-   the FunctionFS endpoint queue failure and the unhandled MUSB IRQ.
+3. Genuine failure paths keep a bounded rate-limited diagnostic:
+   the synchronous and asynchronous FunctionFS endpoint queue failures and
+   the unhandled MUSB IRQ (the latter lives in the MediaTek wrapper, not the
+   generic shared MUSB core).
 
 Run from the kernel source root:
 
@@ -91,29 +93,58 @@ def main():
                     f"print macro: {line.strip()[:80]}"
                 )
 
-    # Genuine failure paths must keep a bounded warn-level diagnostic.
+    # Genuine failure paths must keep a bounded (rate-limited) diagnostic.
+    # Both the synchronous and the asynchronous FunctionFS queue failures must
+    # be covered, and the check must match pr_warn_ratelimited explicitly: an
+    # unbounded pr_warn would re-create the console flooding this contract
+    # exists to prevent.
     ffs_text = FFS.read_text(encoding="utf-8") if FFS.exists() else ""
-    queue_failure = re.search(
+    sync_queue_failure = re.search(
         r"ret\s*=\s*usb_ep_queue\(.*?\);\s*"
-        r"if\s*\(ret\s*<\s*0\)\s*\{[^}]*pr_warn",
+        r"if\s*\(ret\s*<\s*0\)\s*\{[^}]*pr_warn_ratelimited",
         ffs_text,
         re.DOTALL,
     )
-    if not queue_failure:
+    if not sync_queue_failure:
         failures.append(
-            "f_fs.c: endpoint queue failure path lacks a bounded pr_warn diagnostic"
+            "f_fs.c: synchronous endpoint queue failure path lacks a "
+            "rate-limited pr_warn diagnostic"
+        )
+    async_queue_failure = re.search(
+        r"req->complete\s*=\s*ffs_epfile_async_io_complete;\s*"
+        r"ret\s*=\s*usb_ep_queue\(.*?\);\s*"
+        r"if\s*\(ret\)\s*\{[^}]*pr_warn_ratelimited",
+        ffs_text,
+        re.DOTALL,
+    )
+    if not async_queue_failure:
+        failures.append(
+            "f_fs.c: asynchronous endpoint queue failure path lacks a "
+            "rate-limited pr_warn diagnostic"
+        )
+
+    # The unhandled-IRQ diagnostic belongs in the MediaTek platform wrapper,
+    # not the generic shared musb_interrupt() core used by other glue drivers.
+    mediatek_text = MUSB_MEDIATEK.read_text(encoding="utf-8") if MUSB_MEDIATEK.exists() else ""
+    unhandled_irq = re.search(
+        r"MT8163 MUSB unhandled IRQ",
+        mediatek_text,
+    )
+    if not unhandled_irq:
+        failures.append(
+            "mediatek.c: unhandled-IRQ path lacks a bounded dev_warn diagnostic"
+        )
+    if "dev_warn_ratelimited" not in mediatek_text:
+        failures.append(
+            "mediatek.c: unhandled-IRQ diagnostic is not rate-limited"
         )
 
     musb_core = ROOT / "drivers/usb/musb/musb_core.c"
     core_text = musb_core.read_text(encoding="utf-8") if musb_core.exists() else ""
-    unhandled_irq = re.search(
-        r"unhandled.*?dev_warn_ratelimited|dev_warn_ratelimited.*?unhandled",
-        core_text,
-        re.DOTALL | re.IGNORECASE,
-    )
-    if not unhandled_irq:
+    if "MT8163" in core_text:
         failures.append(
-            "musb_core.c: unhandled-IRQ path lacks a bounded dev_warn diagnostic"
+            "musb_core.c: generic shared MUSB core must not contain "
+            "platform-specific MT8163 diagnostics"
         )
 
     if failures:
