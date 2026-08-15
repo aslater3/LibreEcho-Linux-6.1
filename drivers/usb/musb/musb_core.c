@@ -1790,6 +1790,11 @@ irqreturn_t musb_interrupt(struct musb *musb)
 			musb_g_rx(musb, epnum);
 	}
 
+	if (retval == IRQ_NONE)
+		dev_warn_ratelimited(musb->controller,
+			"MT8163 MUSB unhandled IRQ: usb=%02x rx=%04x tx=%04x\n",
+			musb->int_usb, musb->int_rx, musb->int_tx);
+
 	return retval;
 }
 EXPORT_SYMBOL_GPL(musb_interrupt);

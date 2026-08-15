@@ -186,10 +186,10 @@ static void mt8163_musb_diag_work(struct work_struct *work)
 	musb_ep_select(musb->mregs, index);
 	spin_unlock_irqrestore(&musb->lock, flags);
 
-	dev_info(glue->dev,
-		 "MT8163 MUSB delayed diag: l1=%08x/%08x rx=%04x/%04x tx=%04x/%04x ep1-rxcsr=%04x rxcount=%04x txcsr=%04x\n",
-		 l1s, l1m, intrrx, intrrxe, intrtx, intrtxe,
-		 rxcsr, rxcount, txcsr);
+	dev_dbg(glue->dev,
+		"MT8163 MUSB delayed diag: l1=%08x/%08x rx=%04x/%04x tx=%04x/%04x ep1-rxcsr=%04x rxcount=%04x txcsr=%04x\n",
+		l1s, l1m, intrrx, intrrxe, intrtx, intrtxe,
+		rxcsr, rxcount, txcsr);
 }
 
 static int mtk_musb_clks_get(struct mtk_glue *glue)
@@ -299,7 +299,7 @@ static irqreturn_t generic_interrupt(int irq, void *__hci)
 	musb->int_tx = musb_clearw(musb->mregs, MUSB_INTRTX);
 
 	if (musb->int_rx || (musb->int_tx & ~BIT(0)))
-		dev_info_ratelimited(musb->controller,
+		dev_dbg_ratelimited(musb->controller,
 			"MT8163 MUSB IRQ diag: usb=%02x rx=%04x/%04x tx=%04x/%04x\n",
 			musb->int_usb, musb->int_rx,
 			musb_readw(musb->mregs, MUSB_INTRRXE),

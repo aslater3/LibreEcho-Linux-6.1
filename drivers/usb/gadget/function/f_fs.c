@@ -1084,11 +1084,14 @@ static ssize_t ffs_epfile_io(struct file *file, struct ffs_io_data *io_data)
 		req->context  = io_data;
 		req->complete = ffs_epfile_io_complete;
 
-		pr_info_ratelimited("MT8163 FFS queue diag: ep=%s read=%u len=%zu aio=0\n",
-				    ep->ep->name, io_data->read, data_len);
+		pr_debug_ratelimited("MT8163 FFS queue diag: ep=%s read=%u len=%zu aio=0\n",
+				     ep->ep->name, io_data->read, data_len);
 		ret = usb_ep_queue(ep->ep, req, GFP_ATOMIC);
-		if (ret < 0)
+		if (ret < 0) {
+			pr_warn_ratelimited("MT8163 FFS queue failed: ep=%s ret=%d\n",
+					    ep->ep->name, ret);
 			goto error_lock;
+		}
 
 		spin_unlock_irq(&epfile->ffs->eps_lock);
 
