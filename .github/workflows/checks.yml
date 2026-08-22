@@ -4,15 +4,7 @@ on:
   push:
     branches:
       - main
-    paths-ignore:
-      - '**.md'
-      - '**.rst'
-      - 'Documentation/**'
   pull_request:
-    paths-ignore:
-      - '**.md'
-      - '**.rst'
-      - 'Documentation/**'
   workflow_dispatch:
 
 permissions:
@@ -23,8 +15,59 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  docs_gate:
+    name: Documentation-only change gate
+    runs-on: ubuntu-24.04
+    outputs:
+      run_build: ${{ steps.detect.outputs.run_build }}
+    steps:
+      - name: Check out Linux source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      # Event-level paths-ignore filters are not used: GitHub evaluates them
+      # against only the first 300 changed files, so a large mixed change
+      # could skip the build. This gate inspects the complete changed file
+      # set instead and fails closed (any uncertainty runs the build).
+      - name: Detect whether the change is documentation-only
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_build=true
+          changed=""
+          reason="default: run the build"
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            git fetch --depth 1 origin "$GITHUB_BASE_REF"
+            changed="$(git diff --name-only FETCH_HEAD HEAD || true)"
+            reason="pull_request against $GITHUB_BASE_REF"
+          elif [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            before="${{ github.event.before }}"
+            if [ -n "$before" ] && ! printf '%s' "$before" | grep -qE '^0+$' \
+               && git fetch --depth 1 origin "$before" 2>/dev/null; then
+              changed="$(git diff --name-only FETCH_HEAD HEAD || true)"
+              reason="push against $before"
+            else
+              reason="push base unavailable: run the build"
+            fi
+          else
+            reason="manual dispatch: run the build"
+          fi
+          if [ -n "$changed" ] \
+             && ! printf '%s\n' "$changed" | grep -vE '\.(md|rst)$' | grep -v '^Documentation/' | grep -q .; then
+            run_build=false
+            reason="$reason: documentation-only"
+          fi
+          file_count="$(printf '%s\n' "$changed" | grep -c . || true)"
+          echo "gate: reason=$reason changed_files=$file_count run_build=$run_build"
+          echo "run_build=$run_build" >> "$GITHUB_OUTPUT"
+
   arm32_kernel:
     name: ARM32 kernel build and regression checks
+    needs: docs_gate
+    if: needs.docs_gate.outputs.run_build == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
