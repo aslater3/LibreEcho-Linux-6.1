@@ -4,7 +4,15 @@ on:
   push:
     branches:
       - main
+    paths-ignore:
+      - '**.md'
+      - '**.rst'
+      - 'Documentation/**'
   pull_request:
+    paths-ignore:
+      - '**.md'
+      - '**.rst'
+      - 'Documentation/**'
   workflow_dispatch:
 
 permissions:
