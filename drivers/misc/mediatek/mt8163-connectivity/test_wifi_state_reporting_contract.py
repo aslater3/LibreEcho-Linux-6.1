@@ -147,6 +147,8 @@ class WifiStateReportingContractTests(unittest.TestCase):
         self.assertIn("PARAM_MEDIA_STATE_CONNECTED", stale_predicate)
         self.assertIn("rCurrBssId.arMacAddress", stale_predicate)
         self.assertIn("NULL_MAC_ADDR", stale_predicate)
+        self.assertIn("EQUAL_MAC_ADDR", stale_predicate)
+        self.assertNotIn("UNEQUAL_MAC_ADDR", stale_predicate)
         self.assertIn("fgIsConnReqIssued != FALSE", stale_predicate)
         self.assertIn("fgIsDisconnectedByNonRequest = FALSE", helper)
         self.assertIn("aisFsmDisconnect(prAdapter, FALSE)", helper)

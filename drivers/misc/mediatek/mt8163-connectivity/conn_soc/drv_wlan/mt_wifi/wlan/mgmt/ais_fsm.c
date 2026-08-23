@@ -2770,8 +2770,8 @@ static BOOLEAN aisFsmIsStaleConnected(IN P_ADAPTER_T prAdapter)
 
 	return prAisBssInfo->eConnectionState == PARAM_MEDIA_STATE_CONNECTED &&
 	       kalGetMediaStateIndicated(prAdapter->prGlueInfo) == PARAM_MEDIA_STATE_CONNECTED &&
-	       UNEQUAL_MAC_ADDR(prAdapter->rWlanInfo.rCurrBssId.arMacAddress,
-				 aucZeroMacAddr) &&
+	       EQUAL_MAC_ADDR(prAdapter->rWlanInfo.rCurrBssId.arMacAddress,
+				aucZeroMacAddr) &&
 	       prConnSettings->fgIsConnReqIssued != FALSE;
 }
 
