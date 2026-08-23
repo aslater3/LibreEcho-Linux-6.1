@@ -19,6 +19,7 @@
 #include <linux/pinctrl/consumer.h>
 #include <linux/usb/usb_phy_generic.h>
 #include <linux/workqueue.h>
+#include <linux/usb/hcd.h>
 #include "musb_core.h"
 #include "musb_dma.h"
 
@@ -280,6 +281,65 @@ static int mtk_musb_clks_get(struct mtk_glue *glue)
 	return devm_clk_bulk_get(dev, glue->data->num_clks, glue->clks);
 }
 
+/*
+ * Notice a device that was already attached when host mode started.
+ *
+ * MUSB learns about a peripheral from a CONNECT interrupt, which fires on the
+ * edge of the device asserting its D+ pullup -- and a device only does that
+ * when it sees VBUS *rise*. On this board VBUS is supplied externally, so a
+ * drive left plugged in is already powered, already pulled up, and generates
+ * no edge however many times the role is switched. The port then sits empty
+ * until the drive is physically unplugged and replugged.
+ *
+ * Rather than wait for an edge that cannot happen, do deliberately what the
+ * connect handler does: arm the endpoint interrupts, mark the root hub port
+ * connected with its change bit, and let the USB core probe. If nothing is
+ * actually there the core resets an empty port, fails enumeration and clears
+ * the status again, which is noisy in the log but harmless.
+ */
+static void mt8163_musb_rescan_port(struct mtk_glue *glue)
+{
+	struct musb *musb = glue->musb;
+	u8 devctl;
+
+	if (!musb || !musb->hcd)
+		return;
+
+	devctl = readb(musb->mregs + MUSB_DEVCTL);
+
+	musb->is_active = 1;
+	musb->ep0_stage = MUSB_EP0_START;
+
+	musb->intrtxe = musb->epmask;
+	musb_writew(musb->mregs, MUSB_INTRTXE, musb->intrtxe);
+	musb->intrrxe = musb->epmask & 0xfffe;
+	musb_writew(musb->mregs, MUSB_INTRRXE, musb->intrrxe);
+	musb_writeb(musb->mregs, MUSB_INTRUSBE, 0xf7);
+
+	musb->port1_status &= ~(USB_PORT_STAT_LOW_SPEED
+				| USB_PORT_STAT_HIGH_SPEED
+				| USB_PORT_STAT_ENABLE);
+	musb->port1_status |= USB_PORT_STAT_CONNECTION
+				| (USB_PORT_STAT_C_CONNECTION << 16);
+	if (devctl & MUSB_DEVCTL_LSDEV)
+		musb->port1_status |= USB_PORT_STAT_LOW_SPEED;
+
+	musb_set_state(musb, OTG_STATE_A_HOST);
+	musb->is_active = 1;
+
+	dev_info(glue->dev, "MT8163 rescan: port1_status=%08x devctl=%02x rh_state=%d\n",
+		 musb->port1_status, devctl, musb->hcd->state);
+
+	/*
+	 * Wake the root hub first. usb_hcd_poll_rh_status() returns straight
+	 * away unless a status URB is outstanding, and a suspended root hub has
+	 * none -- so polling on its own did nothing at all and the core never
+	 * even attempted a port reset.
+	 */
+	usb_hcd_resume_root_hub(musb->hcd);
+	usb_hcd_poll_rh_status(musb->hcd);
+}
+
 static int mtk_otg_switch_set(struct mtk_glue *glue, enum usb_role role)
 {
 	struct musb *musb = glue->musb;
@@ -325,6 +385,7 @@ static int mtk_otg_switch_set(struct mtk_glue *glue, enum usb_role role)
 			 readb(musb->mregs + MUSB_DEVCTL),
 			 (readb(musb->mregs + MUSB_DEVCTL) >> 7) & 1,
 			 (readb(musb->mregs + MUSB_DEVCTL) >> 3) & 3);
+		mt8163_musb_rescan_port(glue);
 		break;
 	case USB_ROLE_DEVICE:
 		musb->xceiv->otg->state = OTG_STATE_B_IDLE;
