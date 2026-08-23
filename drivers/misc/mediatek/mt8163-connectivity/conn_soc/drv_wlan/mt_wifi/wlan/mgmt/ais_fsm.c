@@ -2751,6 +2751,41 @@ VOID aisFsmStateAbort(IN P_ADAPTER_T prAdapter, UINT_8 ucReasonOfDisconnect, BOO
 
 /*----------------------------------------------------------------------------*/
 /*!
+ * @brief Detect and reset a connected state whose reported BSSID is empty.
+ *
+ * Authentication timeout recovery must not preserve a half-connected state.
+ * Use the normal AIS disconnect path so firmware synchronization, host
+ * indication, STA cleanup, and the existing reconnect policy stay together.
+ */
+/*----------------------------------------------------------------------------*/
+static BOOLEAN aisFsmResetStaleConnection(IN P_ADAPTER_T prAdapter)
+{
+	P_BSS_INFO_T prAisBssInfo;
+	P_CONNECTION_SETTINGS_T prConnSettings;
+	const UINT_8 aucZeroMacAddr[] = NULL_MAC_ADDR;
+
+	ASSERT(prAdapter);
+
+	prAisBssInfo = &(prAdapter->rWifiVar.arBssInfo[NETWORK_TYPE_AIS_INDEX]);
+	prConnSettings = &(prAdapter->rWifiVar.rConnSettings);
+
+	if (prAisBssInfo->eConnectionState != PARAM_MEDIA_STATE_CONNECTED ||
+	    kalGetMediaStateIndicated(prAdapter->prGlueInfo) != PARAM_MEDIA_STATE_CONNECTED ||
+	    UNEQUAL_MAC_ADDR(prAdapter->rWlanInfo.rCurrBssId.arMacAddress,
+			      aucZeroMacAddr) ||
+	    prConnSettings->fgIsConnReqIssued == FALSE)
+		return FALSE;
+
+	DBGLOG(AIS, WARN, "reset stale connected state after auth timeout\n");
+	prAisBssInfo->ucReasonOfDisconnect = DISCONNECT_REASON_CODE_NEW_CONNECTION;
+	prConnSettings->fgIsDisconnectedByNonRequest = FALSE;
+	aisFsmDisconnect(prAdapter, FALSE);
+
+	return TRUE;
+}
+
+/*----------------------------------------------------------------------------*/
+/*!
 * @brief This function will handle the Join Complete Event from SAA FSM for AIS FSM
 *
 * @param[in] prMsgHdr   Message of Join Complete of SAA FSM.
@@ -2768,6 +2803,7 @@ VOID aisFsmRunEventJoinComplete(IN P_ADAPTER_T prAdapter, IN P_MSG_HDR_T prMsgHd
 	P_BSS_INFO_T prAisBssInfo;
 	UINT_8 aucP2pSsid[] = CTIA_MAGIC_SSID;
 	OS_SYSTIME rCurrentTime;
+	BOOLEAN fgResetAndRetry = FALSE;
 
 	DEBUGFUNC("aisFsmRunEventJoinComplete()");
 
@@ -2941,7 +2977,10 @@ VOID aisFsmRunEventJoinComplete(IN P_ADAPTER_T prAdapter, IN P_MSG_HDR_T prMsgHd
 					if (prStaRec != prAisBssInfo->prStaRecOfAP)
 						cnmStaRecFree(prAdapter, prStaRec, FALSE);
 
-					if (prAisBssInfo->eConnectionState == PARAM_MEDIA_STATE_CONNECTED) {
+					fgResetAndRetry = aisFsmResetStaleConnection(prAdapter);
+					if (fgResetAndRetry)
+						eNextState = prAisFsmInfo->eCurrentState;
+					else if (prAisBssInfo->eConnectionState == PARAM_MEDIA_STATE_CONNECTED) {
 #if CFG_SUPPORT_ROAMING
 						eNextState = AIS_STATE_WAIT_FOR_NEXT_SCAN;
 #endif /* CFG_SUPPORT_ROAMING */

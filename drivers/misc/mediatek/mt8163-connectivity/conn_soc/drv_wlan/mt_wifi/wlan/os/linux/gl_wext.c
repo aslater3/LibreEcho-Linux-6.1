@@ -1506,7 +1506,7 @@ wext_get_ap(IN struct net_device *prNetDev,
 	/* return -ENOTCONN; */
 	/* } */
 
-	if (prGlueInfo->eParamMediaStateIndicated == PARAM_MEDIA_STATE_DISCONNECTED) {
+	if (prGlueInfo->eParamMediaStateIndicated != PARAM_MEDIA_STATE_CONNECTED) {
 		memset(prAddr, 0, 6);
 		return 0;
 	}
@@ -2215,6 +2215,11 @@ wext_get_essid(IN struct net_device *prNetDev,
 	if (FALSE == GLUE_CHK_PR3(prNetDev, prEssid, pcExtra))
 		return -EINVAL;
 	prGlueInfo = *((P_GLUE_INFO_T *) netdev_priv(prNetDev));
+
+	if (prGlueInfo->eParamMediaStateIndicated != PARAM_MEDIA_STATE_CONNECTED) {
+		DBGLOG(REQ, TRACE, "get ESSID while disconnected\n");
+		return -ENOTCONN;
+	}
 
 	/* if (!netif_carrier_ok(prNetDev)) { */
 	/* return -ENOTCONN; */
