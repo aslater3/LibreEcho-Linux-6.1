@@ -28,13 +28,6 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFCONFIG = ROOT / "arch/arm/configs/mt8163_arm32_defconfig"
 PRODUCTION_DTS = ROOT / "arch/arm/boot/dts/libreecho-radar-puffin.dts"
 README = ROOT / "README.md"
-INIT_ROOTS = (ROOT / "init", ROOT / "usr")
-INIT_MARKERS = (
-    "mount -t pstore",
-    "/sys/fs/pstore",
-    "console-ramoops",
-    "dmesg-ramoops",
-)
 
 
 class Mt8163PstoreContractTests(unittest.TestCase):
@@ -59,7 +52,14 @@ class Mt8163PstoreContractTests(unittest.TestCase):
         self.assertIn("reserved-memory {", self.dts)
         dt_enabled = 'compatible = "ramoops";' in self.dts
         if dt_enabled:
-            self.assertIn('compatible = "ramoops";', self.dts)
+            node = re.search(r"ramoops\\s*\\{(?P<body>.*?)\\n\\s*\\};", self.dts, re.DOTALL)
+            self.assertIsNotNone(node, "ramoops node must be a complete DT node")
+            if node is None:
+                self.fail("ramoops node must be a complete DT node")
+            body = node.group("body")
+            self.assertRegex(body, r"\\breg\\s*=\\s*<[^>]+>;", "ramoops needs an explicit reserved range")
+            self.assertRegex(body, r"\\brecord-size\\s*=\\s*<[^>]+>;", "ramoops needs record-size")
+            self.assertRegex(body, r"\\bconsole-size\\s*=\\s*<[^>]+>;", "ramoops needs console-size")
         else:
             self.assertIn('compatible = "mediatek,ram_console";', self.dts)
             self.assertNotIn("pstore", self.dts.lower())
@@ -69,22 +69,10 @@ class Mt8163PstoreContractTests(unittest.TestCase):
             "owns ARM32 product tooling, initramfs, feature packaging",
             self.readme,
         )
-        init_enabled = any(
-            marker in path.read_text(encoding="utf-8", errors="ignore")
-            for root in INIT_ROOTS
-            for path in root.rglob("*")
-            if path.is_file()
-            for marker in INIT_MARKERS
+        self.assertIn(
+            "production initramfs and its `/data` archival/rotation policy are owned",
+            self.readme,
         )
-        if not init_enabled:
-            for root in INIT_ROOTS:
-                for path in root.rglob("*"):
-                    if not path.is_file() or path.suffix in {".o", ".a", ".cmd"}:
-                        continue
-                    text = path.read_text(encoding="utf-8", errors="ignore")
-                    for marker in INIT_MARKERS:
-                        with self.subTest(path=path.relative_to(ROOT), marker=marker):
-                            self.assertNotIn(marker, text)
 
     def test_any_future_integration_must_supply_all_layers(self) -> None:
         config_enabled = all(
@@ -92,15 +80,8 @@ class Mt8163PstoreContractTests(unittest.TestCase):
             for name in ("PSTORE", "PSTORE_RAM")
         )
         dt_enabled = 'compatible = "ramoops";' in self.dts
-        init_enabled = any(
-            marker in path.read_text(encoding="utf-8", errors="ignore")
-            for root in INIT_ROOTS
-            for path in root.rglob("*")
-            if path.is_file()
-            for marker in INIT_MARKERS
-        )
-        complete = config_enabled and dt_enabled and init_enabled
-        absent = not config_enabled and not dt_enabled and not init_enabled
+        complete = config_enabled and dt_enabled
+        absent = not config_enabled and not dt_enabled
         self.assertTrue(
             complete or absent,
             "pstore integration must land as one complete, reviewed contract",
