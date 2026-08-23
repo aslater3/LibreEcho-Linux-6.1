@@ -2086,11 +2086,30 @@
 			clocks = <0x2d 0x02 0x05 0x17 0x05 0x07 0x05 0x08>;
 			clock-names = "usbpll\0usbmcu\0usb\0icusb";
 			vusb-supply = <0x2e>;
-			pinctrl-names = "default\0drvvbus_init\0drvvbus_low\0drvvbus_high";
+			/*
+			 * No drvvbus states on radar_puffin.
+			 *
+			 * They claim pinmux <0x2300> -- pin 35, GPIO -- and drive it
+			 * low. On this board pin 35 is not USB_DRVVBUS: it is the
+			 * enable line for the microphone array codecs,
+			 *
+			 *     tlv320aic3101@18 { enable-gpio = <&pio 0x23 0x00>; }
+			 *
+			 * so selecting drvvbus_init or drvvbus_low at probe held all
+			 * four mic codecs disabled. Every I2C write to them failed
+			 * with -EIO, the capture FPGA reported frames=0, and waked
+			 * exited on an empty stream -- the wake word simply stopped
+			 * working, with nothing in the USB logs to suggest why.
+			 *
+			 * Nothing is lost by dropping them: this port does not source
+			 * VBUS at all. It supplies ground and the data pair only, and
+			 * a drive has to be powered externally, so there was never a
+			 * VBUS rail for these states to switch. The driver already
+			 * treats their absence as "the port cannot source VBUS" and
+			 * carries on.
+			 */
+			pinctrl-names = "default";
 			pinctrl-0 = <0x2f>;
-			pinctrl-1 = <0x80>;
-			pinctrl-2 = <0x81>;
-			pinctrl-3 = <0x82>;
 			iddig_gpio = <&pio 0x26 0x00>;
 			status = "okay";
 		};
