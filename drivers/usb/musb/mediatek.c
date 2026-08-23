@@ -189,6 +189,8 @@ static void mt8163_usb_phy_recover(struct mtk_glue *glue)
 #define MT8163_U2PHYDTM0		0x68
 #define MT8163_U2PHYDTM0_PULLDOWN	0xc0	/* RG_DP/DM_PULLDOWN, BIT(6)|BIT(7) */
 #define MT8163_U2PHYDTM0_FORCE_PULLDOWN	0x30	/* FORCE_DP/DM_PULLDOWN, BIT(20)|BIT(21) */
+#define MT8163_U2PHYDTM0_RG_DATAIN	0x3c	/* P2C_RG_DATAIN, GENMASK(13,10) -> byte 1 */
+#define MT8163_U2PHYDTM0_FORCE_DATAIN	0x80	/* P2C_FORCE_DATAIN, BIT(23) -> byte 2 */
 #define MT8163_U2PHYDTM1		0x6c
 #define MT8163_U2PHYDTM1_RG_IDDIG	0x02	/* P2C_RG_IDDIG, BIT(1) */
 #define MT8163_U2PHYDTM1_FORCE_IDDIG	0x02	/* P2C_FORCE_IDDIG, BIT(9) */
@@ -297,6 +299,39 @@ static int mtk_musb_clks_get(struct mtk_glue *glue)
  * actually there the core resets an empty port, fails enumeration and clears
  * the status again, which is noisy in the log but harmless.
  */
+/*
+ * Make the controller see the drive detach and re-attach, without touching
+ * VBUS.
+ *
+ * A drive that is already powered -- externally, on this board -- never drops
+ * its D+ pullup, so MUSB sees no attach edge and the port stays empty however
+ * the role is switched. But the PHY can be told what line state to report:
+ * forcing DATAIN to SE0 looks exactly like an unplugged port, and releasing it
+ * again exposes the pullup as a fresh transition. MUSB then raises a real
+ * CONNECT interrupt and enumeration follows its normal path, rather than the
+ * synthesised connect this driver used to fake.
+ *
+ * SE0 is held well beyond the 2.5 us a reset needs so the device also treats
+ * it as a reset and returns to its default, unaddressed state.
+ */
+static void mt8163_usb_phy_bounce_lines(struct mtk_glue *glue)
+{
+	/* Report SE0: both lines low, i.e. nothing plugged in. */
+	mt8163_usb_phy_clr8(glue, MT8163_U2PHYDTM0 + 1,
+			    MT8163_U2PHYDTM0_RG_DATAIN);
+	mt8163_usb_phy_set8(glue, MT8163_U2PHYDTM0 + 2,
+			    MT8163_U2PHYDTM0_FORCE_DATAIN);
+	msleep(120);
+	/* Release, and let the real line state through again. */
+	mt8163_usb_phy_clr8(glue, MT8163_U2PHYDTM0 + 2,
+			    MT8163_U2PHYDTM0_FORCE_DATAIN);
+	msleep(30);
+	dev_info(glue->dev, "MT8163 line bounce done: dtm0=%02x/%02x/%02x\n",
+		 mt8163_usb_phy_read8(glue, MT8163_U2PHYDTM0),
+		 mt8163_usb_phy_read8(glue, MT8163_U2PHYDTM0 + 1),
+		 mt8163_usb_phy_read8(glue, MT8163_U2PHYDTM0 + 2));
+}
+
 static void mt8163_musb_rescan_port(struct mtk_glue *glue)
 {
 	struct musb *musb = glue->musb;
@@ -400,6 +435,7 @@ static int mtk_otg_switch_set(struct mtk_glue *glue, enum usb_role role)
 			 readb(musb->mregs + MUSB_DEVCTL),
 			 (readb(musb->mregs + MUSB_DEVCTL) >> 7) & 1,
 			 (readb(musb->mregs + MUSB_DEVCTL) >> 3) & 3);
+		mt8163_usb_phy_bounce_lines(glue);
 		mt8163_musb_rescan_port(glue);
 		break;
 	case USB_ROLE_DEVICE:
