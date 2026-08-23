@@ -70,7 +70,7 @@ class WifiStateReportingContractTests(unittest.TestCase):
         )
         query = "wlanoidQueryBssid"
         self.assertIn(state_guard, function)
-        self.assertIn("memset(prAddr, 0, 6);", function)
+        self.assertIn("memset(prAddr->sa_data, 0, ETH_ALEN);", function)
         self.assertLess(function.index(state_guard), function.index(query))
 
     def test_auth_timeout_recovery_resets_divergence_before_retry(self) -> None:

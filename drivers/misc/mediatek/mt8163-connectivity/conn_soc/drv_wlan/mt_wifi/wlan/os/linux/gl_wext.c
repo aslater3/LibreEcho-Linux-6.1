@@ -1507,7 +1507,7 @@ wext_get_ap(IN struct net_device *prNetDev,
 	/* } */
 
 	if (prGlueInfo->eParamMediaStateIndicated != PARAM_MEDIA_STATE_CONNECTED) {
-		memset(prAddr, 0, 6);
+		memset(prAddr->sa_data, 0, ETH_ALEN);
 		return 0;
 	}
 
