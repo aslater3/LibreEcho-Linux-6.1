@@ -195,7 +195,12 @@ static void mt8163_usb_phy_recover(struct mtk_glue *glue)
 #define MT8163_U2PHYDTM0_FORCE_DATAIN	0x80	/* P2C_FORCE_DATAIN, BIT(23) -> byte 2 */
 #define MT8163_U2PHYDTM1		0x6c
 #define MT8163_U2PHYDTM1_RG_IDDIG	0x02	/* P2C_RG_IDDIG, BIT(1) */
+#define MT8163_U2PHYDTM1_RG_AVALID	0x04	/* P2C_RG_AVALID, BIT(2) */
+#define MT8163_U2PHYDTM1_RG_BVALID	0x08	/* P2C_RG_BVALID, BIT(3) */
+#define MT8163_U2PHYDTM1_RG_SESSEND	0x10	/* P2C_RG_SESSEND, BIT(4) */
+#define MT8163_U2PHYDTM1_RG_VBUSVALID	0x20	/* P2C_RG_VBUSVALID, BIT(5) */
 #define MT8163_U2PHYDTM1_FORCE_IDDIG	0x02	/* P2C_FORCE_IDDIG, BIT(9) */
+#define MT8163_U2PHYDTM1_FORCE_OTG	0x3e	/* byte 1: force iddig..vbusvalid */
 
 static void mt8163_usb_phy_set_role(struct mtk_glue *glue, bool host)
 {
@@ -330,36 +335,74 @@ static int mtk_musb_clks_get(struct mtk_glue *glue)
  * the status again, which is noisy in the log but harmless.
  */
 /*
- * Make the controller see the drive detach and re-attach, without touching
- * VBUS.
+ * Restart the session with the PHY's OTG inputs forced through a full
+ * off/on cycle -- the way the vendor kernel enters host mode
+ * (usb20_host.c, musb_id_pin_work: "for no VBUS sensing IP").  This MUSB
+ * has no VBUS comparator of its own: DEVCTL's role and VBUS bits are
+ * computed entirely from the UTMI signals the PHY is told to report.
  *
- * A drive that is already powered -- externally, on this board -- never drops
- * its D+ pullup, so MUSB sees no attach edge and the port stays empty however
- * the role is switched. But the PHY can be told what line state to report:
- * forcing DATAIN to SE0 looks exactly like an unplugged port, and releasing it
- * again exposes the pullup as a fresh transition. MUSB then raises a real
- * CONNECT interrupt and enumeration follows its normal path, rather than the
- * synthesised connect this driver used to fake.
+ * The core latches A- versus B-device only when a session *starts*.  On
+ * this board VBUS is external and permanent, so BVALID/VBUSVALID have
+ * been forced high since the gadget first came up: DEVCTL.SESSION is
+ * already 1, no session edge can ever happen, and the role latch keeps
+ * its boot value -- bdevice=1, hostmode=0 -- no matter what IDDIG says
+ * afterwards.  Clearing DEVCTL.SESSION alone cannot end the session
+ * either: for a B-device the bit is hardware-owned and simply re-asserts
+ * while the PHY still reports a valid session.
  *
- * SE0 is held well beyond the 2.5 us a reset needs so the device also treats
- * it as a reset and returns to its default, unaddressed state.
+ * So do exactly what the vendor does.  Report SessEnd=1 with every valid
+ * signal low (the vendor's "USB MAC OFF" state) so the session genuinely
+ * ends, wait for the FSM to settle, then request a session and raise the
+ * A-side valid levels with IDDIG still forced low.  The core starts a
+ * fresh session as the A-device, samples the line, finds the resident
+ * drive's D+ pullup already there, and raises a real CONNECT interrupt
+ * -- no attach edge required.
  */
-static void mt8163_usb_phy_bounce_lines(struct mtk_glue *glue)
+static void mt8163_musb_restart_session_as_host(struct mtk_glue *glue)
 {
-	/* Report SE0: both lines low, i.e. nothing plugged in. */
-	mt8163_usb_phy_clr8(glue, MT8163_U2PHYDTM0 + 1,
-			    MT8163_U2PHYDTM0_RG_DATAIN);
-	mt8163_usb_phy_set8(glue, MT8163_U2PHYDTM0 + 2,
-			    MT8163_U2PHYDTM0_FORCE_DATAIN);
-	msleep(120);
-	/* Release, and let the real line state through again. */
-	mt8163_usb_phy_clr8(glue, MT8163_U2PHYDTM0 + 2,
-			    MT8163_U2PHYDTM0_FORCE_DATAIN);
-	msleep(30);
-	dev_info(glue->dev, "MT8163 line bounce done: dtm0=%02x/%02x/%02x\n",
-		 mt8163_usb_phy_read8(glue, MT8163_U2PHYDTM0),
-		 mt8163_usb_phy_read8(glue, MT8163_U2PHYDTM0 + 1),
-		 mt8163_usb_phy_read8(glue, MT8163_U2PHYDTM0 + 2));
+	struct musb *musb = glue->musb;
+	u8 devctl;
+	int i;
+
+	devctl = readb(musb->mregs + MUSB_DEVCTL);
+	musb_writeb(musb->mregs, MUSB_DEVCTL, devctl & ~MUSB_DEVCTL_SESSION);
+
+	/* USB MAC OFF: VBUSVALID=0, AVALID=0, BVALID=0, SESSEND=1, IDDIG=0 */
+	mt8163_usb_phy_set8(glue, MT8163_U2PHYDTM1,
+			    MT8163_U2PHYDTM1_RG_SESSEND);
+	mt8163_usb_phy_clr8(glue, MT8163_U2PHYDTM1,
+			    MT8163_U2PHYDTM1_RG_IDDIG |
+			    MT8163_U2PHYDTM1_RG_AVALID |
+			    MT8163_U2PHYDTM1_RG_BVALID |
+			    MT8163_U2PHYDTM1_RG_VBUSVALID);
+	mt8163_usb_phy_set8(glue, MT8163_U2PHYDTM1 + 1,
+			    MT8163_U2PHYDTM1_FORCE_OTG);
+	usleep_range(5000, 6000);
+
+	devctl = readb(musb->mregs + MUSB_DEVCTL);
+	musb_writeb(musb->mregs, MUSB_DEVCTL, devctl | MUSB_DEVCTL_SESSION);
+
+	/* USB MAC ON, host: VBUSVALID=1, AVALID=1, BVALID=1, SESSEND=0, IDDIG=0 */
+	mt8163_usb_phy_clr8(glue, MT8163_U2PHYDTM1,
+			    MT8163_U2PHYDTM1_RG_SESSEND);
+	mt8163_usb_phy_set8(glue, MT8163_U2PHYDTM1,
+			    MT8163_U2PHYDTM1_RG_AVALID |
+			    MT8163_U2PHYDTM1_RG_BVALID |
+			    MT8163_U2PHYDTM1_RG_VBUSVALID);
+	mt8163_usb_phy_set8(glue, MT8163_U2PHYDTM1 + 1,
+			    MT8163_U2PHYDTM1_FORCE_OTG);
+
+	/* The role latch is what every failed attempt got wrong; watch it. */
+	for (i = 0; i < 50; i++) {
+		devctl = readb(musb->mregs + MUSB_DEVCTL);
+		if (!(devctl & MUSB_DEVCTL_BDEVICE))
+			break;
+		usleep_range(2000, 3000);
+	}
+	dev_info(glue->dev,
+		 "MT8163 host session restart: devctl=%02x bdevice=%u hostmode=%u vbus=%u session=%u polls=%d\n",
+		 devctl, (devctl >> 7) & 1, (devctl >> 2) & 1,
+		 (devctl >> 3) & 3, devctl & 1, i);
 }
 
 static void mt8163_musb_rescan_port(struct mtk_glue *glue)
@@ -515,17 +558,23 @@ static int mtk_otg_switch_set(struct mtk_glue *glue, enum usb_role role)
 		musb_start(musb);
 		if (glue->data->needs_soc_phy_recover && glue->phy_base)
 			mt8163_usb_phy_set_role(glue, true);
-		devctl = readb(musb->mregs + MUSB_DEVCTL);
-		if (!(devctl & MUSB_DEVCTL_SESSION)) {
-			devctl |= MUSB_DEVCTL_SESSION;
-			musb_writeb(musb->mregs, MUSB_DEVCTL, devctl);
-		}
-		usleep_range(20000, 25000);
-		dev_info(glue->dev, "MT8163 post-session devctl=%02x bdevice=%u vbus=%u\n",
-			 readb(musb->mregs + MUSB_DEVCTL),
-			 (readb(musb->mregs + MUSB_DEVCTL) >> 7) & 1,
-			 (readb(musb->mregs + MUSB_DEVCTL) >> 3) & 3);
-		mt8163_usb_phy_bounce_lines(glue);
+		/*
+		 * musb_start() folds its clear-then-maybe-set of the session
+		 * bit into one register write, so when SESSION already reads
+		 * 1 -- which it always does here, the forced BVALID has kept
+		 * a B-session alive since boot -- the controller never sees a
+		 * session edge and never re-latches the role.  Cycle the
+		 * session for real, with the PHY reporting session-end so the
+		 * clear actually sticks.
+		 */
+		mt8163_musb_restart_session_as_host(glue);
+		/*
+		 * If the restart raised CONNECT the port is already occupied
+		 * and the rescan below returns without touching it; it stays
+		 * only as a fallback for a controller that latched host mode
+		 * without noticing the resident pullup.
+		 */
+		msleep(100);
 		mt8163_musb_rescan_port(glue);
 		break;
 	case USB_ROLE_DEVICE:
