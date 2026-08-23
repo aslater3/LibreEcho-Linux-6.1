@@ -401,7 +401,24 @@ static int mtk_otg_switch_set(struct mtk_glue *glue, enum usb_role role)
 
 	switch (role) {
 	case USB_ROLE_HOST:
-		musb->xceiv->otg->state = OTG_STATE_A_WAIT_VRISE;
+		/*
+		 * A_WAIT_BCON, not A_WAIT_VRISE.
+		 *
+		 * musb_start() decides host or peripheral like this:
+		 *
+		 *   if (port_mode != MUSB_HOST &&
+		 *       state != OTG_STATE_A_WAIT_BCON &&
+		 *       (devctl & VBUS) == VBUS)   -> act as a peripheral
+		 *   else                           -> start a host session
+		 *
+		 * With dr_mode "otg" and VBUS already present -- which it is here,
+		 * because the bus is powered externally -- the first branch wins and
+		 * the controller settles as a B-device, which is exactly the
+		 * devctl bdevice=1 seen on every failed attempt. A_WAIT_BCON is the
+		 * documented escape: it means "host, waiting for a device to
+		 * connect", which is precisely the situation.
+		 */
+		musb->xceiv->otg->state = OTG_STATE_A_WAIT_BCON;
 		glue->phy_mode = PHY_MODE_USB_HOST;
 		new_role = USB_ROLE_HOST;
 		if (glue->phy && glue->role == USB_ROLE_NONE)
@@ -418,6 +435,28 @@ static int mtk_otg_switch_set(struct mtk_glue *glue, enum usb_role role)
 			mt8163_usb_phy_set_role(glue, true);
 
 		/*
+		 * Drop the gadget's D+ pullup before becoming a host.
+		 *
+		 * MUSB_POWER_SOFTCONN is the peripheral-side 1.5k pullup, set by
+		 * musb_pullup() when a gadget binds -- adbd, here. Nothing in the
+		 * role switch ever cleared it, so the port asserted a pullup while
+		 * simultaneously presenting host pulldowns: a host and a device on
+		 * the same wire. A drive plugged into that sees no clean attach and
+		 * answers nothing, which matches the descriptor timeouts observed.
+		 */
+		{
+			u8 power = readb(musb->mregs + MUSB_POWER);
+
+			if (power & MUSB_POWER_SOFTCONN) {
+				power &= ~MUSB_POWER_SOFTCONN;
+				musb_writeb(musb->mregs, MUSB_POWER, power);
+				dev_info(glue->dev,
+					 "MT8163 dropped gadget D+ pullup, power=%02x\n",
+					 readb(musb->mregs + MUSB_POWER));
+			}
+		}
+
+		/*
 		 * Let the forced IDDIG settle before the session starts. MUSB
 		 * latches the A/B decision from the PHY when the session bit is
 		 * written; reading DEVCTL straight after the role write showed
@@ -426,10 +465,31 @@ static int mtk_otg_switch_set(struct mtk_glue *glue, enum usb_role role)
 		 */
 		usleep_range(5000, 8000);
 
-		devctl = readb(musb->mregs + MUSB_DEVCTL);
-		devctl |= MUSB_DEVCTL_SESSION;
-		musb_writeb(musb->mregs, MUSB_DEVCTL, devctl);
+		/*
+		 * Re-run the controller's own start path rather than only poking
+		 * DEVCTL: it re-enables interrupts, sets POWER (including HSENAB,
+		 * so high speed is offered) and then starts the session with the
+		 * host semantics selected above.
+		 */
 		MUSB_HST_MODE(musb);
+		/*
+		 * musb_start() runs musb_platform_enable(), which on this SoC is
+		 * the PHY recovery sequence -- and that clears the D+/D- pulldowns
+		 * and only restores host settings when glue->role already says
+		 * host. glue->role is assigned further down, so the first version
+		 * of this left the port with dtm0=00/00: no host termination at
+		 * all. Claim the role first, then re-assert after, so recovery
+		 * cannot leave the PHY configured as a peripheral.
+		 */
+		glue->role = USB_ROLE_HOST;
+		musb_start(musb);
+		if (glue->data->needs_soc_phy_recover && glue->phy_base)
+			mt8163_usb_phy_set_role(glue, true);
+		devctl = readb(musb->mregs + MUSB_DEVCTL);
+		if (!(devctl & MUSB_DEVCTL_SESSION)) {
+			devctl |= MUSB_DEVCTL_SESSION;
+			musb_writeb(musb->mregs, MUSB_DEVCTL, devctl);
+		}
 		usleep_range(20000, 25000);
 		dev_info(glue->dev, "MT8163 post-session devctl=%02x bdevice=%u vbus=%u\n",
 			 readb(musb->mregs + MUSB_DEVCTL),
