@@ -305,6 +305,21 @@ static void mt8163_musb_rescan_port(struct mtk_glue *glue)
 	if (!musb || !musb->hcd)
 		return;
 
+	/*
+	 * Never disturb a port that already has a device on it. Asserting the
+	 * connect-change bit here is read by the core as "something changed",
+	 * so on an occupied port it tears the working device down and then has
+	 * to enumerate it again from scratch -- which fails, because the drive
+	 * is already powered and will not re-present itself without a VBUS
+	 * cycle this board cannot perform. Observed as an immediate
+	 * "USB disconnect, device number N" followed by descriptor timeouts.
+	 */
+	if (musb->port1_status & USB_PORT_STAT_CONNECTION) {
+		dev_info(glue->dev,
+			 "MT8163 rescan skipped: port already has a device\n");
+		return;
+	}
+
 	devctl = readb(musb->mregs + MUSB_DEVCTL);
 
 	musb->is_active = 1;
