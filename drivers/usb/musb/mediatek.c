@@ -16,6 +16,7 @@
 #include <linux/platform_device.h>
 #include <linux/regulator/consumer.h>
 #include <linux/usb/role.h>
+#include <linux/pinctrl/consumer.h>
 #include <linux/usb/usb_phy_generic.h>
 #include <linux/workqueue.h>
 #include "musb_core.h"
@@ -82,6 +83,13 @@ struct mtk_glue {
 	enum usb_role role;
 	struct usb_role_switch *role_sw;
 	void __iomem *phy_base;
+	/* The vendor DTS carries drvvbus pin states that nothing referenced, so the
+	 * pin was never muxed and the port could not raise bus VBUS.  A downstream
+	 * device will not pull up D+ until it sees VBUS, so nothing enumerated
+	 * however the drive itself was powered. */
+	struct pinctrl *pinctrl;
+	struct pinctrl_state *vbus_on;
+	struct pinctrl_state *vbus_off;
 	struct delayed_work diag_work;
 };
 
@@ -116,6 +124,8 @@ static void mt8163_usb_phy_clr8(struct mtk_glue *glue, u32 offset, u8 mask)
  * transceiver is sufficient to register the UDC, but D+ never asserts and
  * the host cannot enumerate the gadget.
  */
+static void mt8163_usb_phy_set_role(struct mtk_glue *glue, bool host);
+
 static void mt8163_usb_phy_recover(struct mtk_glue *glue)
 {
 	/* VUSB and all four controller clocks are already enabled by probe. */
@@ -148,12 +158,79 @@ static void mt8163_usb_phy_recover(struct mtk_glue *glue)
 	mt8163_usb_phy_set8(glue, 0x6d, 0x3e);
 	mt8163_usb_phy_set8(glue, 0x05, 0x77);
 
+	/* The sequence above hardcodes B-device settings, so re-apply whichever
+	 * role is currently selected rather than silently reverting to device. */
+	if (glue->role == USB_ROLE_HOST)
+		mt8163_usb_phy_set_role(glue, true);
+
 	dev_info(glue->dev,
 		 "MT8163 USB2 PHY recovered: eye=%02x line=%02x force=%02x vbus=%02x\n",
 		 mt8163_usb_phy_read8(glue, 0x05),
 		 mt8163_usb_phy_read8(glue, 0x68),
 		 mt8163_usb_phy_read8(glue, 0x6a),
 		 mt8163_usb_phy_read8(glue, 0x1a));
+}
+
+/*
+ * Select the PHY role.  mt8163_usb_phy_recover() leaves the PHY configured as
+ * a B-device, which is all the vendor sequence ever needed: this SoC predates
+ * the generic MediaTek USB2 PHY provider, so nothing else programs it and host
+ * mode was never wired up.  The MUSB core would flip its own role and set the
+ * session bit while the PHY stayed a peripheral, so a downstream device was
+ * never detected however it was powered.
+ *
+ * The register is the same one phy-mtk-tphy.c drives in
+ * u2_phy_instance_set_mode(): IDDIG is forced, and its level picks the role --
+ * 0 is the A-device (host), 1 the B-device (peripheral).  U2PHYDTM1 sits at
+ * 0x6c here, so P2C_RG_IDDIG (bit 1) falls in byte 0 and P2C_FORCE_IDDIG
+ * (bit 9) in byte 1.
+ */
+#define MT8163_U2PHYDTM0		0x68
+#define MT8163_U2PHYDTM0_PULLDOWN	0xc0	/* RG_DP/DM_PULLDOWN, BIT(6)|BIT(7) */
+#define MT8163_U2PHYDTM0_FORCE_PULLDOWN	0x30	/* FORCE_DP/DM_PULLDOWN, BIT(20)|BIT(21) */
+#define MT8163_U2PHYDTM1		0x6c
+#define MT8163_U2PHYDTM1_RG_IDDIG	0x02	/* P2C_RG_IDDIG, BIT(1) */
+#define MT8163_U2PHYDTM1_FORCE_IDDIG	0x02	/* P2C_FORCE_IDDIG, BIT(9) */
+
+static void mt8163_usb_phy_set_role(struct mtk_glue *glue, bool host)
+{
+	mt8163_usb_phy_set8(glue, MT8163_U2PHYDTM1 + 1,
+			    MT8163_U2PHYDTM1_FORCE_IDDIG);
+	if (host)
+		mt8163_usb_phy_clr8(glue, MT8163_U2PHYDTM1,
+				    MT8163_U2PHYDTM1_RG_IDDIG);
+	else
+		mt8163_usb_phy_set8(glue, MT8163_U2PHYDTM1,
+				    MT8163_U2PHYDTM1_RG_IDDIG);
+	/*
+	 * A host presents 15k pulldowns on D+/D-; the peripheral's 1.5k pullup
+	 * against them is what signals an attach and selects the speed.  The
+	 * recovery sequence clears both because it only ever configured a
+	 * B-device, so without this a host-configured port sees no connection
+	 * however the downstream device is powered.  DTM0 byte 0 holds the
+	 * pulldowns and byte 2 the force bits, per phy-mtk-tphy.c.
+	 */
+	if (glue->pinctrl && glue->vbus_on && glue->vbus_off)
+		pinctrl_select_state(glue->pinctrl,
+				     host ? glue->vbus_on : glue->vbus_off);
+	if (host) {
+		mt8163_usb_phy_set8(glue, MT8163_U2PHYDTM0,
+				    MT8163_U2PHYDTM0_PULLDOWN);
+		mt8163_usb_phy_set8(glue, MT8163_U2PHYDTM0 + 2,
+				    MT8163_U2PHYDTM0_FORCE_PULLDOWN);
+	} else {
+		mt8163_usb_phy_clr8(glue, MT8163_U2PHYDTM0,
+				    MT8163_U2PHYDTM0_PULLDOWN);
+		mt8163_usb_phy_clr8(glue, MT8163_U2PHYDTM0 + 2,
+				    MT8163_U2PHYDTM0_FORCE_PULLDOWN);
+	}
+	dev_info(glue->dev,
+		 "MT8163 USB2 PHY role=%s dtm1=%02x/%02x dtm0=%02x/%02x\n",
+		 host ? "host" : "device",
+		 mt8163_usb_phy_read8(glue, MT8163_U2PHYDTM1),
+		 mt8163_usb_phy_read8(glue, MT8163_U2PHYDTM1 + 1),
+		 mt8163_usb_phy_read8(glue, MT8163_U2PHYDTM0),
+		 mt8163_usb_phy_read8(glue, MT8163_U2PHYDTM0 + 2));
 }
 
 static void mt8163_musb_diag_work(struct work_struct *work)
@@ -220,9 +297,34 @@ static int mtk_otg_switch_set(struct mtk_glue *glue, enum usb_role role)
 		if (glue->phy && glue->role == USB_ROLE_NONE)
 			phy_power_on(glue->phy);
 
+		/*
+		 * Configure the PHY for host *before* starting the session.
+		 * The role write below used to happen after MUSB_DEVCTL_SESSION,
+		 * so the controller sampled VBUS while the PHY was still wired
+		 * as a B-device -- it read the line as invalid and parked in
+		 * A_WAIT_VRISE waiting for a rise that had already happened.
+		 */
+		if (glue->data->needs_soc_phy_recover && glue->phy_base)
+			mt8163_usb_phy_set_role(glue, true);
+
+		/*
+		 * Let the forced IDDIG settle before the session starts. MUSB
+		 * latches the A/B decision from the PHY when the session bit is
+		 * written; reading DEVCTL straight after the role write showed
+		 * B_DEVICE still set, i.e. the controller had sampled the old
+		 * value and would never enumerate.
+		 */
+		usleep_range(5000, 8000);
+
+		devctl = readb(musb->mregs + MUSB_DEVCTL);
 		devctl |= MUSB_DEVCTL_SESSION;
 		musb_writeb(musb->mregs, MUSB_DEVCTL, devctl);
 		MUSB_HST_MODE(musb);
+		usleep_range(20000, 25000);
+		dev_info(glue->dev, "MT8163 post-session devctl=%02x bdevice=%u vbus=%u\n",
+			 readb(musb->mregs + MUSB_DEVCTL),
+			 (readb(musb->mregs + MUSB_DEVCTL) >> 7) & 1,
+			 (readb(musb->mregs + MUSB_DEVCTL) >> 3) & 3);
 		break;
 	case USB_ROLE_DEVICE:
 		musb->xceiv->otg->state = OTG_STATE_B_IDLE;
@@ -250,6 +352,21 @@ static int mtk_otg_switch_set(struct mtk_glue *glue, enum usb_role role)
 	}
 
 	glue->role = new_role;
+	if (glue->data->needs_soc_phy_recover && glue->phy_base &&
+	    new_role != USB_ROLE_HOST)
+		mt8163_usb_phy_set_role(glue, false);
+	/*
+	 * What the controller actually sees. DEVCTL bits 4:3 are the VBUS
+	 * level: 3 means above VBusValid, 0 means below SessionEnd. Without
+	 * this the only evidence was the FSM state, which cannot distinguish
+	 * "no VBUS" from "VBUS present but never rose".
+	 */
+	dev_info(glue->dev, "MT8163 role=%s devctl=%02x vbus_level=%u session=%u\n",
+		 new_role == USB_ROLE_HOST ? "host" :
+		 new_role == USB_ROLE_DEVICE ? "device" : "none",
+		 readb(musb->mregs + MUSB_DEVCTL),
+		 (readb(musb->mregs + MUSB_DEVCTL) >> 3) & 3,
+		 readb(musb->mregs + MUSB_DEVCTL) & 1);
 	if (glue->phy)
 		phy_set_mode(glue->phy, glue->phy_mode);
 
@@ -610,6 +727,26 @@ static int mtk_musb_probe(struct platform_device *pdev)
 		glue->phy_base = devm_platform_ioremap_resource(pdev, 1);
 		if (IS_ERR(glue->phy_base))
 			return PTR_ERR(glue->phy_base);
+
+		glue->pinctrl = devm_pinctrl_get(dev);
+		if (!IS_ERR(glue->pinctrl)) {
+			struct pinctrl_state *init;
+
+			init = pinctrl_lookup_state(glue->pinctrl, "drvvbus_init");
+			if (!IS_ERR(init))
+				pinctrl_select_state(glue->pinctrl, init);
+			glue->vbus_on = pinctrl_lookup_state(glue->pinctrl,
+							     "drvvbus_high");
+			glue->vbus_off = pinctrl_lookup_state(glue->pinctrl,
+							      "drvvbus_low");
+			if (IS_ERR(glue->vbus_on) || IS_ERR(glue->vbus_off)) {
+				glue->vbus_on = NULL;
+				glue->vbus_off = NULL;
+				dev_info(dev, "no drvvbus pin states; the port cannot source VBUS\n");
+			}
+		} else {
+			glue->pinctrl = NULL;
+		}
 
 		ret = devm_regulator_get_enable(dev, "vusb");
 		if (ret)
