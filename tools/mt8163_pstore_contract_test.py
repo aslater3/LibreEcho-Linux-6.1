@@ -52,14 +52,14 @@ class Mt8163PstoreContractTests(unittest.TestCase):
         self.assertIn("reserved-memory {", self.dts)
         dt_enabled = 'compatible = "ramoops";' in self.dts
         if dt_enabled:
-            node = re.search(r"ramoops\\s*\\{(?P<body>.*?)\\n\\s*\\};", self.dts, re.DOTALL)
+            node = re.search(r"ramoops(?:@[^\s{]+)?\s*\{(?P<body>.*?)\n\s*\};", self.dts, re.DOTALL)
             self.assertIsNotNone(node, "ramoops node must be a complete DT node")
             if node is None:
                 self.fail("ramoops node must be a complete DT node")
             body = node.group("body")
-            self.assertRegex(body, r"\\breg\\s*=\\s*<[^>]+>;", "ramoops needs an explicit reserved range")
-            self.assertRegex(body, r"\\brecord-size\\s*=\\s*<[^>]+>;", "ramoops needs record-size")
-            self.assertRegex(body, r"\\bconsole-size\\s*=\\s*<[^>]+>;", "ramoops needs console-size")
+            self.assertRegex(body, r"\breg\s*=\s*<[^>]+>;", "ramoops needs an explicit reserved range")
+            self.assertRegex(body, r"\brecord-size\s*=\s*<[^>]+>;", "ramoops needs record-size")
+            self.assertRegex(body, r"\bconsole-size\s*=\s*<[^>]+>;", "ramoops needs console-size")
         else:
             self.assertIn('compatible = "mediatek,ram_console";', self.dts)
             self.assertNotIn("pstore", self.dts.lower())
