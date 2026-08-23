@@ -165,15 +165,17 @@ def validate_ramoops_contract(dts: str) -> None:
 
     for name, body in ramoops_nodes:
         status = _string_property(body, "status")
-        if status is not None and status.lower() not in {"okay", "ok"}:
+        if status is not None and status not in {"okay", "ok"}:
             raise AssertionError(f"ramoops node {name} must be enabled, got status={status!r}")
 
         ramoops_ranges = _reg_ranges(body, address_count, size_count)
         if not ramoops_ranges:
             raise AssertionError(f"ramoops node {name} needs an explicit nonempty reg")
+        reserved_size = 0
         for address, size in ramoops_ranges:
             if size == 0:
                 raise AssertionError(f"ramoops node {name} needs a nonzero reg size")
+            reserved_size += size
             end = address + size
             for other_name, other_address, other_size in existing_ranges:
                 other_end = other_address + other_size
@@ -187,11 +189,17 @@ def validate_ramoops_contract(dts: str) -> None:
         for property_name in ("record-size", "console-size", "ftrace-size", "pmsg-size"):
             values = _cells(body, property_name)
             if values is not None:
-                buffer_sizes.append((property_name, _fold_cells(values)))
+                if len(values) != 1:
+                    raise AssertionError(
+                        f"ramoops {property_name} must contain one u32 cell"
+                    )
+                buffer_sizes.append((property_name, values[0]))
         if not buffer_sizes or not any(size > 0 for _, size in buffer_sizes):
             raise AssertionError(f"ramoops node {name} needs a nonzero buffer size")
-        if any(size < 0 for _, size in buffer_sizes):
-            raise AssertionError(f"ramoops node {name} has an invalid buffer size")
+        if sum(size for _, size in buffer_sizes) > reserved_size:
+            raise AssertionError(
+                f"ramoops buffers exceed the reserved region for node {name}"
+            )
 
 
 class Mt8163PstoreContractTests(unittest.TestCase):
@@ -275,6 +283,44 @@ class Mt8163PstoreContractTests(unittest.TestCase):
 \t\t};""",
         )
         validate_ramoops_contract(dts)
+
+    def test_ramoops_rejects_mixed_case_status(self) -> None:
+        dts = self._with_ramoops(
+            self.dts,
+            """\t\tramoops@45000000 {
+\t\t\tcompatible = \"ramoops\";
+\t\t\tstatus = \"OKAY\";
+\t\t\treg = <0x00 0x45000000 0x00 0x200000>;
+\t\t\trecord-size = <0x10000>;
+\t\t};""",
+        )
+        with self.assertRaisesRegex(AssertionError, "enabled"):
+            validate_ramoops_contract(dts)
+
+    def test_ramoops_rejects_multicell_buffer_property(self) -> None:
+        dts = self._with_ramoops(
+            self.dts,
+            """\t\tramoops@45000000 {
+\t\t\tcompatible = \"ramoops\";
+\t\t\treg = <0x00 0x45000000 0x00 0x200000>;
+\t\t\trecord-size = <0 0x10000>;
+\t\t};""",
+        )
+        with self.assertRaisesRegex(AssertionError, "one u32"):
+            validate_ramoops_contract(dts)
+
+    def test_ramoops_rejects_buffers_larger_than_reserved_region(self) -> None:
+        dts = self._with_ramoops(
+            self.dts,
+            """\t\tramoops@45000000 {
+\t\t\tcompatible = \"ramoops\";
+\t\t\treg = <0x00 0x45000000 0x00 0x200000>;
+\t\t\trecord-size = <0x10000>;
+\t\t\tconsole-size = <0x300000>;
+\t\t};""",
+        )
+        with self.assertRaisesRegex(AssertionError, "exceed"):
+            validate_ramoops_contract(dts)
 
     def test_kernel_tree_does_not_claim_product_initramfs_archival(self) -> None:
         self.assertIn(
