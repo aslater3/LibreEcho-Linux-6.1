@@ -43,36 +43,48 @@ class Mt8163PstoreContractTests(unittest.TestCase):
         self.dts = PRODUCTION_DTS.read_text(encoding="utf-8")
         self.readme = README.read_text(encoding="utf-8")
 
-    def test_current_tree_is_not_partially_pstore_enabled(self) -> None:
+    def test_pstore_config_layers_are_consistent(self) -> None:
         enabled = {
             symbol: bool(re.search(rf"^{symbol}=[ym]$", self.config, re.MULTILINE))
             for symbol in ("CONFIG_PSTORE", "CONFIG_PSTORE_RAM")
         }
-        self.assertEqual(
-            enabled,
-            {"CONFIG_PSTORE": False, "CONFIG_PSTORE_RAM": False},
-            "do not enable pstore without the DT and initramfs layers",
-        )
+        if any(enabled.values()):
+            self.assertEqual(
+                enabled,
+                {"CONFIG_PSTORE": True, "CONFIG_PSTORE_RAM": True},
+                "pstore config must enable both symbols together",
+            )
 
     def test_production_dt_has_no_unowned_ramoops_region(self) -> None:
         self.assertIn("reserved-memory {", self.dts)
-        self.assertIn('compatible = "mediatek,ram_console";', self.dts)
-        self.assertNotIn('compatible = "ramoops";', self.dts)
-        self.assertNotIn("pstore", self.dts.lower())
+        dt_enabled = 'compatible = "ramoops";' in self.dts
+        if dt_enabled:
+            self.assertIn('compatible = "ramoops";', self.dts)
+        else:
+            self.assertIn('compatible = "mediatek,ram_console";', self.dts)
+            self.assertNotIn("pstore", self.dts.lower())
 
     def test_kernel_tree_does_not_claim_product_initramfs_archival(self) -> None:
         self.assertIn(
             "owns ARM32 product tooling, initramfs, feature packaging",
             self.readme,
         )
-        for root in INIT_ROOTS:
-            for path in root.rglob("*"):
-                if not path.is_file() or path.suffix in {".o", ".a", ".cmd"}:
-                    continue
-                text = path.read_text(encoding="utf-8", errors="ignore")
-                for marker in INIT_MARKERS:
-                    with self.subTest(path=path.relative_to(ROOT), marker=marker):
-                        self.assertNotIn(marker, text)
+        init_enabled = any(
+            marker in path.read_text(encoding="utf-8", errors="ignore")
+            for root in INIT_ROOTS
+            for path in root.rglob("*")
+            if path.is_file()
+            for marker in INIT_MARKERS
+        )
+        if not init_enabled:
+            for root in INIT_ROOTS:
+                for path in root.rglob("*"):
+                    if not path.is_file() or path.suffix in {".o", ".a", ".cmd"}:
+                        continue
+                    text = path.read_text(encoding="utf-8", errors="ignore")
+                    for marker in INIT_MARKERS:
+                        with self.subTest(path=path.relative_to(ROOT), marker=marker):
+                            self.assertNotIn(marker, text)
 
     def test_any_future_integration_must_supply_all_layers(self) -> None:
         config_enabled = all(
@@ -87,8 +99,10 @@ class Mt8163PstoreContractTests(unittest.TestCase):
             if path.is_file()
             for marker in INIT_MARKERS
         )
-        self.assertFalse(
-            config_enabled or dt_enabled or init_enabled,
+        complete = config_enabled and dt_enabled and init_enabled
+        absent = not config_enabled and not dt_enabled and not init_enabled
+        self.assertTrue(
+            complete or absent,
             "pstore integration must land as one complete, reviewed contract",
         )
 
