@@ -90,6 +90,8 @@ struct mtk_glue {
 	 * however the drive itself was powered. */
 	struct pinctrl *pinctrl;
 	struct pinctrl_state *vbus_on;
+	u8 last_devctl;
+	bool devctl_seen;
 	struct pinctrl_state *vbus_off;
 	struct delayed_work diag_work;
 };
@@ -249,6 +251,34 @@ static void mt8163_musb_diag_work(struct work_struct *work)
 
 	if (!musb)
 		return;
+
+	/*
+	 * DEVCTL every tick. The bit that matters is 7 (BDEVICE): it has read 1
+	 * on every failed host attempt, and what it reads during a session that
+	 * actually works has never been captured -- a drive inserted while host
+	 * mode is on does enumerate, but nothing was logging then. Without that
+	 * comparison there is no way to tell a misconfiguration from a status
+	 * bit that simply means "no device attached yet".
+	 */
+	{
+		u8 dc = readb(musb->mregs + MUSB_DEVCTL);
+
+		/* Only on change: the log window is small and a line every couple
+		   of seconds would push out the USB messages this exists to sit
+		   beside. Transitions are the interesting part anyway. */
+		if (!glue->devctl_seen || dc != glue->last_devctl) {
+			glue->last_devctl = dc;
+			glue->devctl_seen = true;
+			dev_info(glue->dev,
+				 "MT8163 devctl=%02x bdevice=%u hostmode=%u vbus=%u session=%u role=%s\n",
+				 dc, (dc >> 7) & 1, (dc >> 2) & 1, (dc >> 3) & 3, dc & 1,
+				 glue->role == USB_ROLE_HOST ? "host" :
+				 glue->role == USB_ROLE_DEVICE ? "device" : "none");
+		}
+	}
+	/* Keep watching. The worker was a one-shot, so it reported once ten
+	   seconds after enable and never again. */
+	schedule_delayed_work(&glue->diag_work, msecs_to_jiffies(2000));
 
 	spin_lock_irqsave(&musb->lock, flags);
 	l1s = musb_readl(musb->mregs, USB_L1INTS);
