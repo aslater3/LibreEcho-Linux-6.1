@@ -41,11 +41,18 @@ def _model_auth_failure(
     result: RecoveryResult,
 ) -> None:
     """Bounded model of the production failure decision, not fake hardware."""
-    if deadline_expired:
+    if _stale_connected(snapshot):
+        if deadline_expired:
+            result.actions.extend(
+                ("disconnect", "cleanup", "clear-connection-request", "abort")
+            )
+        else:
+            result.actions.extend(("disconnect", "cleanup", "retry"))
+            result.retries += 1
+    elif snapshot.bss_connected:
+        result.actions.append("wait-for-roaming")
+    elif deadline_expired:
         result.actions.extend(("clear-connection-request", "abort"))
-    elif _stale_connected(snapshot):
-        result.actions.extend(("disconnect", "cleanup", "retry"))
-        result.retries += 1
     else:
         result.actions.extend(("retry",))
         result.retries += 1
@@ -121,6 +128,11 @@ class WifiStateReportingContractTests(unittest.TestCase):
 
     def test_auth_timeout_recovery_resets_divergence_before_retry(self) -> None:
         source = AIS_FSM.read_text(encoding="utf-8")
+        stale_predicate = self._function(
+            source,
+            "static BOOLEAN aisFsmIsStaleConnected(",
+            "/*----------------------------------------------------------------------------*/",
+        )
         helper = self._function(
             source,
             "static BOOLEAN aisFsmResetStaleConnection(",
@@ -132,10 +144,10 @@ class WifiStateReportingContractTests(unittest.TestCase):
             "/* end of aisFsmRunEventJoinComplete() */",
         )
 
-        self.assertIn("PARAM_MEDIA_STATE_CONNECTED", helper)
-        self.assertIn("rCurrBssId.arMacAddress", helper)
-        self.assertIn("NULL_MAC_ADDR", helper)
-        self.assertIn("fgIsConnReqIssued == FALSE", helper)
+        self.assertIn("PARAM_MEDIA_STATE_CONNECTED", stale_predicate)
+        self.assertIn("rCurrBssId.arMacAddress", stale_predicate)
+        self.assertIn("NULL_MAC_ADDR", stale_predicate)
+        self.assertIn("fgIsConnReqIssued != FALSE", stale_predicate)
         self.assertIn("fgIsDisconnectedByNonRequest = FALSE", helper)
         self.assertIn("aisFsmDisconnect(prAdapter, FALSE)", helper)
 
@@ -160,6 +172,9 @@ class WifiStateReportingContractTests(unittest.TestCase):
                     ["disconnect", "cleanup", "retry"],
                 )
                 self.assertEqual(result.retries, 1)
+            elif values[0]:
+                self.assertEqual(result.actions, ["wait-for-roaming"])
+                self.assertEqual(result.retries, 0)
             else:
                 self.assertEqual(result.actions, ["retry"])
                 self.assertEqual(result.retries, 1)
@@ -177,10 +192,19 @@ class WifiStateReportingContractTests(unittest.TestCase):
             )
         self.assertEqual(result.retries, deadline)
         self.assertEqual(
-            result.actions[-2:],
-            ["clear-connection-request", "abort"],
+            result.actions[-4:],
+            ["disconnect", "cleanup", "clear-connection-request", "abort"],
         )
         self.assertEqual(result.actions[:3], ["disconnect", "cleanup", "retry"])
+
+        valid_roaming = RecoveryResult()
+        _model_auth_failure(
+            RecoverySnapshot(True, True, False, True),
+            deadline_expired=True,
+            result=valid_roaming,
+        )
+        self.assertEqual(valid_roaming.actions, ["wait-for-roaming"])
+        self.assertEqual(valid_roaming.retries, 0)
 
     def test_production_failure_path_checks_deadline_before_reset_helper(self) -> None:
         source = AIS_FSM.read_text(encoding="utf-8")

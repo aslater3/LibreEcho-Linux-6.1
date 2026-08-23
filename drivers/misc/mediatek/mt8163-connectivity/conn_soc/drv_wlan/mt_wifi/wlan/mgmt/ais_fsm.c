@@ -2751,6 +2751,32 @@ VOID aisFsmStateAbort(IN P_ADAPTER_T prAdapter, UINT_8 ucReasonOfDisconnect, BOO
 
 /*----------------------------------------------------------------------------*/
 /*!
+ * @brief Detect a connected state whose reported BSSID is empty.
+ *
+ * Authentication timeout recovery uses this predicate to distinguish a stale
+ * connected state from a valid roaming/reassociation connection.
+ */
+/*----------------------------------------------------------------------------*/
+static BOOLEAN aisFsmIsStaleConnected(IN P_ADAPTER_T prAdapter)
+{
+	P_BSS_INFO_T prAisBssInfo;
+	P_CONNECTION_SETTINGS_T prConnSettings;
+	const UINT_8 aucZeroMacAddr[] = NULL_MAC_ADDR;
+
+	ASSERT(prAdapter);
+
+	prAisBssInfo = &(prAdapter->rWifiVar.arBssInfo[NETWORK_TYPE_AIS_INDEX]);
+	prConnSettings = &(prAdapter->rWifiVar.rConnSettings);
+
+	return prAisBssInfo->eConnectionState == PARAM_MEDIA_STATE_CONNECTED &&
+	       kalGetMediaStateIndicated(prAdapter->prGlueInfo) == PARAM_MEDIA_STATE_CONNECTED &&
+	       UNEQUAL_MAC_ADDR(prAdapter->rWlanInfo.rCurrBssId.arMacAddress,
+				 aucZeroMacAddr) &&
+	       prConnSettings->fgIsConnReqIssued != FALSE;
+}
+
+/*----------------------------------------------------------------------------*/
+/*!
  * @brief Detect and reset a connected state whose reported BSSID is empty.
  *
  * Authentication timeout recovery must not preserve a half-connected state.
@@ -2762,19 +2788,14 @@ static BOOLEAN aisFsmResetStaleConnection(IN P_ADAPTER_T prAdapter)
 {
 	P_BSS_INFO_T prAisBssInfo;
 	P_CONNECTION_SETTINGS_T prConnSettings;
-	const UINT_8 aucZeroMacAddr[] = NULL_MAC_ADDR;
 
 	ASSERT(prAdapter);
 
+	if (!aisFsmIsStaleConnected(prAdapter))
+		return FALSE;
+
 	prAisBssInfo = &(prAdapter->rWifiVar.arBssInfo[NETWORK_TYPE_AIS_INDEX]);
 	prConnSettings = &(prAdapter->rWifiVar.rConnSettings);
-
-	if (prAisBssInfo->eConnectionState != PARAM_MEDIA_STATE_CONNECTED ||
-	    kalGetMediaStateIndicated(prAdapter->prGlueInfo) != PARAM_MEDIA_STATE_CONNECTED ||
-	    UNEQUAL_MAC_ADDR(prAdapter->rWlanInfo.rCurrBssId.arMacAddress,
-			      aucZeroMacAddr) ||
-	    prConnSettings->fgIsConnReqIssued == FALSE)
-		return FALSE;
 
 	DBGLOG(AIS, WARN, "reset stale connected state after auth timeout\n");
 	prAisBssInfo->ucReasonOfDisconnect = DISCONNECT_REASON_CODE_NEW_CONNECTION;
@@ -2804,6 +2825,7 @@ VOID aisFsmRunEventJoinComplete(IN P_ADAPTER_T prAdapter, IN P_MSG_HDR_T prMsgHd
 	UINT_8 aucP2pSsid[] = CTIA_MAGIC_SSID;
 	OS_SYSTIME rCurrentTime;
 	BOOLEAN fgResetAndRetry = FALSE;
+	BOOLEAN fgStaleConnected = FALSE;
 
 	DEBUGFUNC("aisFsmRunEventJoinComplete()");
 
@@ -2977,9 +2999,29 @@ VOID aisFsmRunEventJoinComplete(IN P_ADAPTER_T prAdapter, IN P_MSG_HDR_T prMsgHd
 					if (prStaRec != prAisBssInfo->prStaRecOfAP)
 						cnmStaRecFree(prAdapter, prStaRec, FALSE);
 
-					if (CHECK_FOR_TIMEOUT(rCurrentTime, prAisFsmInfo->rJoinReqTime,
-						SEC_TO_SYSTIME(AIS_JOIN_TIMEOUT))) {
-						/* abort connection trial before resetting stale state */
+					fgStaleConnected = aisFsmIsStaleConnected(prAdapter);
+					if (fgStaleConnected &&
+					    CHECK_FOR_TIMEOUT(rCurrentTime, prAisFsmInfo->rJoinReqTime,
+							      SEC_TO_SYSTIME(AIS_JOIN_TIMEOUT))) {
+						/* Clean the stale state before aborting the expired trial. */
+						aisFsmResetStaleConnection(prAdapter);
+						prAdapter->rWifiVar.rConnSettings.fgIsConnReqIssued = FALSE;
+
+						kalIndicateStatusAndComplete(prAdapter->prGlueInfo,
+								     WLAN_STATUS_CONNECT_INDICATION, NULL, 0);
+
+						eNextState = AIS_STATE_IDLE;
+					} else if (fgStaleConnected) {
+						fgResetAndRetry = aisFsmResetStaleConnection(prAdapter);
+						if (fgResetAndRetry)
+							eNextState = prAisFsmInfo->eCurrentState;
+					} else if (prAisBssInfo->eConnectionState == PARAM_MEDIA_STATE_CONNECTED) {
+#if CFG_SUPPORT_ROAMING
+						eNextState = AIS_STATE_WAIT_FOR_NEXT_SCAN;
+#endif /* CFG_SUPPORT_ROAMING */
+					} else if (CHECK_FOR_TIMEOUT(rCurrentTime, prAisFsmInfo->rJoinReqTime,
+								SEC_TO_SYSTIME(AIS_JOIN_TIMEOUT))) {
+						/* abort connection trial */
 						prAdapter->rWifiVar.rConnSettings.fgIsConnReqIssued = FALSE;
 
 						kalIndicateStatusAndComplete(prAdapter->prGlueInfo,
@@ -2987,19 +3029,10 @@ VOID aisFsmRunEventJoinComplete(IN P_ADAPTER_T prAdapter, IN P_MSG_HDR_T prMsgHd
 
 						eNextState = AIS_STATE_IDLE;
 					} else {
-						fgResetAndRetry = aisFsmResetStaleConnection(prAdapter);
-						if (fgResetAndRetry)
-							eNextState = prAisFsmInfo->eCurrentState;
-						else if (prAisBssInfo->eConnectionState == PARAM_MEDIA_STATE_CONNECTED) {
-#if CFG_SUPPORT_ROAMING
-							eNextState = AIS_STATE_WAIT_FOR_NEXT_SCAN;
-#endif /* CFG_SUPPORT_ROAMING */
-						} else {
-							/* 4.b send reconnect request */
-							aisFsmInsertRequest(prAdapter, AIS_REQUEST_RECONNECT);
+						/* 4.b send reconnect request */
+						aisFsmInsertRequest(prAdapter, AIS_REQUEST_RECONNECT);
 
-							eNextState = AIS_STATE_IDLE;
-						}
+						eNextState = AIS_STATE_IDLE;
 					}
 				}
 			}
