@@ -1,8 +1,54 @@
 #!/usr/bin/env python3
 """Source contracts for MT8163 Wi-Fi state convergence and reporting."""
 
+from dataclasses import dataclass, field
+from itertools import product
 from pathlib import Path
 import unittest
+
+
+
+
+@dataclass
+class RecoverySnapshot:
+    """Host-only model of the predicates consumed by the AIS recovery helper."""
+
+    bss_connected: bool
+    host_connected: bool
+    bssid_zero: bool
+    connection_requested: bool
+
+
+@dataclass
+class RecoveryResult:
+    actions: list[str] = field(default_factory=list)
+    retries: int = 0
+
+
+def _stale_connected(snapshot: RecoverySnapshot) -> bool:
+    return (
+        snapshot.bss_connected
+        and snapshot.host_connected
+        and snapshot.bssid_zero
+        and snapshot.connection_requested
+    )
+
+
+def _model_auth_failure(
+    snapshot: RecoverySnapshot,
+    *,
+    deadline_expired: bool,
+    result: RecoveryResult,
+) -> None:
+    """Bounded model of the production failure decision, not fake hardware."""
+    if deadline_expired:
+        result.actions.extend(("clear-connection-request", "abort"))
+    elif _stale_connected(snapshot):
+        result.actions.extend(("disconnect", "cleanup", "retry"))
+        result.retries += 1
+    else:
+        result.actions.extend(("retry",))
+        result.retries += 1
 
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -99,6 +145,52 @@ class WifiStateReportingContractTests(unittest.TestCase):
         self.assertLess(
             join_complete.index(reset_call),
             join_complete.index("if (fgResetAndRetry)"),
+        )
+
+    def test_stale_predicate_truth_table_only_resets_the_exact_combination(self) -> None:
+        stale_cases = []
+        for values in product((False, True), repeat=4):
+            snapshot = RecoverySnapshot(*values)
+            result = RecoveryResult()
+            _model_auth_failure(snapshot, deadline_expired=False, result=result)
+            if values == (True, True, True, True):
+                stale_cases.append(values)
+                self.assertEqual(
+                    result.actions,
+                    ["disconnect", "cleanup", "retry"],
+                )
+                self.assertEqual(result.retries, 1)
+            else:
+                self.assertEqual(result.actions, ["retry"])
+                self.assertEqual(result.retries, 1)
+        self.assertEqual(stale_cases, [(True, True, True, True)])
+
+    def test_stale_recovery_is_bounded_by_join_deadline(self) -> None:
+        snapshot = RecoverySnapshot(True, True, True, True)
+        result = RecoveryResult()
+        deadline = 3
+        for elapsed in range(deadline + 1):
+            _model_auth_failure(
+                snapshot,
+                deadline_expired=elapsed >= deadline,
+                result=result,
+            )
+        self.assertEqual(result.retries, deadline)
+        self.assertEqual(
+            result.actions[-2:],
+            ["clear-connection-request", "abort"],
+        )
+        self.assertEqual(result.actions[:3], ["disconnect", "cleanup", "retry"])
+
+    def test_production_failure_path_checks_deadline_before_reset_helper(self) -> None:
+        source = AIS_FSM.read_text(encoding="utf-8")
+        failure_path = source.split(
+            "if (aisFsmStateInit_RetryJOIN(prAdapter, prStaRec) == FALSE)",
+            1,
+        )[1].split("/* end of aisFsmRunEventJoinComplete() */", 1)[0]
+        self.assertLess(
+            failure_path.index("CHECK_FOR_TIMEOUT"),
+            failure_path.index("aisFsmResetStaleConnection(prAdapter)"),
         )
 
 

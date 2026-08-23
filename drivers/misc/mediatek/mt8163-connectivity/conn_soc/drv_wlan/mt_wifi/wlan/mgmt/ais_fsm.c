@@ -2977,16 +2977,9 @@ VOID aisFsmRunEventJoinComplete(IN P_ADAPTER_T prAdapter, IN P_MSG_HDR_T prMsgHd
 					if (prStaRec != prAisBssInfo->prStaRecOfAP)
 						cnmStaRecFree(prAdapter, prStaRec, FALSE);
 
-					fgResetAndRetry = aisFsmResetStaleConnection(prAdapter);
-					if (fgResetAndRetry)
-						eNextState = prAisFsmInfo->eCurrentState;
-					else if (prAisBssInfo->eConnectionState == PARAM_MEDIA_STATE_CONNECTED) {
-#if CFG_SUPPORT_ROAMING
-						eNextState = AIS_STATE_WAIT_FOR_NEXT_SCAN;
-#endif /* CFG_SUPPORT_ROAMING */
-					} else if (CHECK_FOR_TIMEOUT(rCurrentTime, prAisFsmInfo->rJoinReqTime,
-						 SEC_TO_SYSTIME(AIS_JOIN_TIMEOUT))) {
-						/* abort connection trial */
+					if (CHECK_FOR_TIMEOUT(rCurrentTime, prAisFsmInfo->rJoinReqTime,
+						SEC_TO_SYSTIME(AIS_JOIN_TIMEOUT))) {
+						/* abort connection trial before resetting stale state */
 						prAdapter->rWifiVar.rConnSettings.fgIsConnReqIssued = FALSE;
 
 						kalIndicateStatusAndComplete(prAdapter->prGlueInfo,
@@ -2994,10 +2987,19 @@ VOID aisFsmRunEventJoinComplete(IN P_ADAPTER_T prAdapter, IN P_MSG_HDR_T prMsgHd
 
 						eNextState = AIS_STATE_IDLE;
 					} else {
-						/* 4.b send reconnect request */
-						aisFsmInsertRequest(prAdapter, AIS_REQUEST_RECONNECT);
+						fgResetAndRetry = aisFsmResetStaleConnection(prAdapter);
+						if (fgResetAndRetry)
+							eNextState = prAisFsmInfo->eCurrentState;
+						else if (prAisBssInfo->eConnectionState == PARAM_MEDIA_STATE_CONNECTED) {
+#if CFG_SUPPORT_ROAMING
+							eNextState = AIS_STATE_WAIT_FOR_NEXT_SCAN;
+#endif /* CFG_SUPPORT_ROAMING */
+						} else {
+							/* 4.b send reconnect request */
+							aisFsmInsertRequest(prAdapter, AIS_REQUEST_RECONNECT);
 
-						eNextState = AIS_STATE_IDLE;
+							eNextState = AIS_STATE_IDLE;
+						}
 					}
 				}
 			}
