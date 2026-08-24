@@ -980,6 +980,7 @@
 ********************************************************************************
 */
 #include "precomp.h"
+#include "mgmt/ais_fsm_recovery.h"
 
 /*******************************************************************************
 *                              C O N S T A N T S
@@ -2768,11 +2769,13 @@ static BOOLEAN aisFsmIsStaleConnected(IN P_ADAPTER_T prAdapter)
 	prAisBssInfo = &(prAdapter->rWifiVar.arBssInfo[NETWORK_TYPE_AIS_INDEX]);
 	prConnSettings = &(prAdapter->rWifiVar.rConnSettings);
 
-	return prAisBssInfo->eConnectionState == PARAM_MEDIA_STATE_CONNECTED &&
-	       kalGetMediaStateIndicated(prAdapter->prGlueInfo) == PARAM_MEDIA_STATE_CONNECTED &&
-	       EQUAL_MAC_ADDR(prAdapter->rWlanInfo.rCurrBssId.arMacAddress,
-				aucZeroMacAddr) &&
-	       prConnSettings->fgIsConnReqIssued != FALSE;
+	return aisFsmHasStaleConnectedState(
+		prAisBssInfo->eConnectionState == PARAM_MEDIA_STATE_CONNECTED,
+		kalGetMediaStateIndicated(prAdapter->prGlueInfo) ==
+			PARAM_MEDIA_STATE_CONNECTED,
+		EQUAL_MAC_ADDR(prAdapter->rWlanInfo.rCurrBssId.arMacAddress,
+				       aucZeroMacAddr),
+		prConnSettings->fgIsConnReqIssued != FALSE);
 }
 
 /*----------------------------------------------------------------------------*/
@@ -2784,7 +2787,8 @@ static BOOLEAN aisFsmIsStaleConnected(IN P_ADAPTER_T prAdapter)
  * indication, STA cleanup, and the existing reconnect policy stay together.
  */
 /*----------------------------------------------------------------------------*/
-static BOOLEAN aisFsmResetStaleConnection(IN P_ADAPTER_T prAdapter)
+static BOOLEAN aisFsmResetStaleConnection(IN P_ADAPTER_T prAdapter,
+							 IN BOOLEAN fgAbortExpired)
 {
 	P_BSS_INFO_T prAisBssInfo;
 	P_CONNECTION_SETTINGS_T prConnSettings;
@@ -2800,6 +2804,8 @@ static BOOLEAN aisFsmResetStaleConnection(IN P_ADAPTER_T prAdapter)
 	DBGLOG(AIS, WARN, "reset stale connected state after auth timeout\n");
 	prAisBssInfo->ucReasonOfDisconnect = DISCONNECT_REASON_CODE_NEW_CONNECTION;
 	prConnSettings->fgIsDisconnectedByNonRequest = FALSE;
+	if (fgAbortExpired)
+		prConnSettings->fgIsConnReqIssued = FALSE;
 	aisFsmDisconnect(prAdapter, FALSE);
 
 	return TRUE;
@@ -2826,6 +2832,7 @@ VOID aisFsmRunEventJoinComplete(IN P_ADAPTER_T prAdapter, IN P_MSG_HDR_T prMsgHd
 	OS_SYSTIME rCurrentTime;
 	BOOLEAN fgResetAndRetry = FALSE;
 	BOOLEAN fgStaleConnected = FALSE;
+	enum ENUM_AIS_STALE_RECOVERY_ACTION eStaleRecoveryAction;
 
 	DEBUGFUNC("aisFsmRunEventJoinComplete()");
 
@@ -3000,22 +3007,28 @@ VOID aisFsmRunEventJoinComplete(IN P_ADAPTER_T prAdapter, IN P_MSG_HDR_T prMsgHd
 						cnmStaRecFree(prAdapter, prStaRec, FALSE);
 
 					fgStaleConnected = aisFsmIsStaleConnected(prAdapter);
-					if (fgStaleConnected &&
-					    CHECK_FOR_TIMEOUT(rCurrentTime, prAisFsmInfo->rJoinReqTime,
-							      SEC_TO_SYSTIME(AIS_JOIN_TIMEOUT))) {
+					eStaleRecoveryAction = aisFsmClassifyJoinFailure(
+						fgStaleConnected,
+						prAisBssInfo->eConnectionState ==
+							PARAM_MEDIA_STATE_CONNECTED,
+						CHECK_FOR_TIMEOUT(rCurrentTime,
+							prAisFsmInfo->rJoinReqTime,
+							SEC_TO_SYSTIME(AIS_JOIN_TIMEOUT)));
+					if (eStaleRecoveryAction == AIS_STALE_RECOVERY_ABORT) {
 						/* Clean the stale state before aborting the expired trial. */
-						aisFsmResetStaleConnection(prAdapter);
-						prAdapter->rWifiVar.rConnSettings.fgIsConnReqIssued = FALSE;
+						aisFsmResetStaleConnection(prAdapter, TRUE);
 
 						kalIndicateStatusAndComplete(prAdapter->prGlueInfo,
 								     WLAN_STATUS_CONNECT_INDICATION, NULL, 0);
 
 						eNextState = AIS_STATE_IDLE;
-					} else if (fgStaleConnected) {
-						fgResetAndRetry = aisFsmResetStaleConnection(prAdapter);
+					} else if (eStaleRecoveryAction ==
+						   AIS_STALE_RECOVERY_DISCONNECT_RETRY) {
+						fgResetAndRetry = aisFsmResetStaleConnection(prAdapter, FALSE);
 						if (fgResetAndRetry)
 							eNextState = prAisFsmInfo->eCurrentState;
-					} else if (prAisBssInfo->eConnectionState == PARAM_MEDIA_STATE_CONNECTED) {
+					} else if (eStaleRecoveryAction ==
+						   AIS_STALE_RECOVERY_WAIT_ROAMING) {
 #if CFG_SUPPORT_ROAMING
 						eNextState = AIS_STATE_WAIT_FOR_NEXT_SCAN;
 #endif /* CFG_SUPPORT_ROAMING */
