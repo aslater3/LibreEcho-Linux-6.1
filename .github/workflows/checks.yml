@@ -92,6 +92,9 @@ jobs:
       - name: Run WEXT and cfg80211 regression contract
         run: python3 drivers/misc/mediatek/mt8163-connectivity/test_wext_cfg80211_fallback.py
 
+      - name: Run Wi-Fi state convergence contract
+        run: python3 drivers/misc/mediatek/mt8163-connectivity/test_wifi_state_reporting_contract.py
+
       - name: Configure and build kernel
         shell: bash
         run: |

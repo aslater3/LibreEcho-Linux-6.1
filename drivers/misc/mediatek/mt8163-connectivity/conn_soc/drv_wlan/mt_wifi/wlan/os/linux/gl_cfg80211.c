@@ -388,6 +388,12 @@ int mtk_cfg80211_get_station(struct wiphy *wiphy, struct net_device *ndev, const
 	prGlueInfo = (P_GLUE_INFO_T) wiphy_priv(wiphy);
 	ASSERT(prGlueInfo);
 
+	/* Do not query stale BSSID state after media disconnect. */
+	if (prGlueInfo->eParamMediaStateIndicated != PARAM_MEDIA_STATE_CONNECTED) {
+		DBGLOG(REQ, TRACE, "get station while disconnected\n");
+		return -ENOTCONN;
+	}
+
 	kalMemZero(arBssid, MAC_ADDR_LEN);
 	wlanQueryInformation(prGlueInfo->prAdapter, wlanoidQueryBssid, &arBssid[0], sizeof(arBssid), &u4BufLen);
 
