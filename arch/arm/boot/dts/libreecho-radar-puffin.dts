@@ -235,10 +235,50 @@
 			 * the comment was wrong. Decimal makes the number legible
 			 * at a glance so the two cannot drift apart again.
 			 */
+			/*
+			 * The power an enclosure this size can shed while the die
+			 * sits at the target trip. Four cores at 1.3 GHz draw about
+			 * 2311 mW by the coefficient above, and this part settles at
+			 * 81.5 C running exactly that, so the sustainable figure is a
+			 * little under it. Needs confirming on hardware.
+			 */
+			sustainable-power = <2000>;
+
+			/*
+			 * Mirrors mainline's MediaTek zones: a threshold where
+			 * control begins and a target it regulates toward.
+			 *
+			 * 68 C is what mainline uses for both mt8173 and mt8183, and
+			 * Amazon's own ladder for this SoC starts one degree below
+			 * it at 67 C. Three independent sources agree, which is why
+			 * it is here rather than a number of my own.
+			 *
+			 * It is close to where this device idles -- 66.7 C measured,
+			 * peaks of 71.8 C -- and that is exactly why the governor
+			 * matters. power_allocator treats the threshold as "start
+			 * budgeting" and does not touch the clock while the die is
+			 * below target, so idling astride it costs nothing. Under
+			 * step_wise a mapped trip here would cap the clock at idle,
+			 * which is why nothing is mapped to it.
+			 */
 			trips {
-				/* Start throttling CPUfreq at 85 C. */
-				cpu_passive: cpu-passive {
-					temperature = <85000>;
+				threshold: trip-point0 {
+					temperature = <68000>;
+					hysteresis = <2000>;
+					type = "passive";
+				};
+
+				/*
+				 * The temperature to hold. 80 C is mainline's
+				 * mt8183 figure and sits just under the 81.5 C this
+				 * board reaches on sustained four-core load, so it
+				 * is the first trip in this tree that will actually
+				 * engage: the old 85 C was never reached, and the
+				 * cooling state stayed at 0 for an entire
+				 * characterisation run.
+				 */
+				target: trip-point1 {
+					temperature = <80000>;
 					hysteresis = <2000>;
 					type = "passive";
 				};
@@ -263,7 +303,7 @@
 
 			cooling-maps {
 				map0 {
-					trip = <&cpu_passive>;
+					trip = <&target>;
 					cooling-device = <&cpu0 0xffffffff 0xffffffff>,
 							 <&cpu1 0xffffffff 0xffffffff>,
 							 <&cpu2 0xffffffff 0xffffffff>,
@@ -3101,6 +3141,7 @@
 
 &cpu0 {
 	operating-points-v2 = <&cpu_opp_table>;
+	dynamic-power-coefficient = <263>;
 	cpu-supply = <&mt6323_vproc_reg>;
 	clocks = <&apmixedsys 0x00>;
 	clock-names = "cpu";
@@ -3109,6 +3150,7 @@
 
 &cpu1 {
 	operating-points-v2 = <&cpu_opp_table>;
+	dynamic-power-coefficient = <263>;
 	cpu-supply = <&mt6323_vproc_reg>;
 	clocks = <&apmixedsys 0x00>;
 	clock-names = "cpu";
@@ -3117,6 +3159,7 @@
 
 &cpu2 {
 	operating-points-v2 = <&cpu_opp_table>;
+	dynamic-power-coefficient = <263>;
 	cpu-supply = <&mt6323_vproc_reg>;
 	clocks = <&apmixedsys 0x00>;
 	clock-names = "cpu";
@@ -3125,6 +3168,7 @@
 
 &cpu3 {
 	operating-points-v2 = <&cpu_opp_table>;
+	dynamic-power-coefficient = <263>;
 	cpu-supply = <&mt6323_vproc_reg>;
 	clocks = <&apmixedsys 0x00>;
 	clock-names = "cpu";

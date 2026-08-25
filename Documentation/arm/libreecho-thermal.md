@@ -221,12 +221,78 @@ as the single throttle point is far more permissive than the people who designed
 the hardware intended, and that the gap is large enough to be deliberate rather
 than incidental.
 
+## What mainline does, and what this tree now mirrors
+
+MT8163 was never upstreamed — mainline 6.1 has no `mt8163.dtsi`. Its closest
+relatives are `mt8173` (same era, same V1 thermal controller in `mtk_thermal.c`)
+and `mt8183`. Both describe their CPU zone the same way:
+
+| | mt8173 | mt8183 | vendor `biscuit` | this tree, before |
+|---|---|---|---|---|
+| first response | `threshold` **68000** | `threshold` **68000** | `cpu_adaptive_2` **67000** | — |
+| control target | `target` 85000 | `target` 80000 | ladder to 95000 | single trip 84904 |
+| critical | 115000 | 115000 | **117000** | 117000 |
+| passive poll | 1000 | 100 | **250** | 1000 |
+| power model | `sustainable-power`, `dynamic-power-coefficient` | same | `thermal_budget` in mW | none |
+
+That table resolves the trip-comment mystery completely. **115000 is mainline's
+critical and 117000 is the vendor's.** Whoever wrote this zone took mainline's
+structure — hence a comment reading `115 C` — and the vendor's value. Both
+numbers were real; they came from different places.
+
+It also shows what was dropped. Mainline's zone has *two* passive trips, and the
+naming is not decorative: `threshold` is where control begins and `target` is
+the temperature the governor regulates toward, which is the `power_allocator`
+(IPA) contract. Along with `sustainable-power` and `contribution`, mainline's
+zone is built for a power-budget governor — the same approach the vendor takes
+with `thermal_budget` and its `cpu_adaptive_*` coolers in milliwatts. This tree
+kept `target`, dropped `threshold`, dropped the power model, and ran step_wise.
+
+### The mirror
+
+- **`dynamic-power-coefficient = <263>`** on all four CPUs — mainline's figure
+  for the mt8173's A53 cluster, the same core on the same process generation.
+  It cross-checks against Amazon: 263 uW/MHz/V² puts four cores at 1216 MHz on
+  1.25 V at 1999 mW, and the vendor's second `thermal_budget` step is 1958 mW.
+- **`threshold` at 68000**, unmapped, exactly as mainline leaves it.
+- **`target` at 80000**, carrying the cooling map — mt8183's figure, and just
+  under the 81.5 C this board reaches on sustained load. It is the first trip in
+  this tree that will actually engage.
+- **`sustainable-power = <2000>`**, a little under the ~2311 mW four cores draw
+  at 1.3 GHz. Needs confirming on hardware.
+- `CONFIG_ENERGY_MODEL` and `CONFIG_THERMAL_GOV_POWER_ALLOCATOR`, in a new
+  `libreecho_mt8163_thermal.config`.
+
+### Why the default governor is deliberately left alone
+
+`thermal_zone_device_register()` treats a failed governor bind as fatal to the
+zone — it jumps straight to `unregister`. `power_allocator_bind()` calls
+`check_power_actors()`, which fails unless every cooling device attached to the
+zone exposes a power model. So making IPA the default means that if the energy
+model does not come up for any reason, the whole `cpu-thermal` zone disappears,
+taking the critical trip with it. That is worse than the problem being solved,
+and it cannot be verified without booting the result.
+
+step_wise therefore stays the default. It still throttles at `target`, which is
+already an improvement on a trip that never fired, and `threshold` stays
+unmapped so it cannot cap the clock at idle — the device idles at 66.7 C, astride
+that trip. Switching one zone is reversible at runtime and a failed switch falls
+back rather than unregistering:
+
+```sh
+echo power_allocator > /sys/class/thermal/thermal_zone0/policy
+```
+
+Flipping the compiled default is a one-line change to the fragment once that has
+been confirmed on hardware.
+
 ## Still open
 
-- **A graduated passive ladder.** The measurements support adding an
-  intermediate trip: sustained load parks at 81.5 C with no response at all
-  until 85 C. Where to put it is a judgement about heat against response
-  latency, and this device has a sub-second budget to defend.
+- **Confirming the mirror on hardware.** None of it has been booted.
+  `sustainable-power` in particular is an estimate from the power model and one
+  characterisation run, and IPA's behaviour at `threshold` is the whole reason
+  68 C is safe to declare — both need watching on a real device before the
+  default governor is flipped.
 - **A different cpufreq governor.** Worth more than the trip values --- 66.7 C at
   100 % idle is paid continuously for nothing. But `scaling_available_governors`
   reads `performance` and nothing else: no other governor is compiled in, so
