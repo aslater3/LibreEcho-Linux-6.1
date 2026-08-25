@@ -3081,31 +3081,17 @@
 	 * keep working.
 	 */
 	/*
-	 * The action button. The vendor puts it on the keypad matrix as
-	 * KEY_HELP and mediatek,mt8163-keypad has no driver here, so it emitted
-	 * nothing at all until this node existed.
+	 * The action button is NOT on any of the keypad pins that nothing else
+	 * claims. Probing KPROW0, KPROW1 and KPCOL0 with distinct keycodes and
+	 * pressing the button produced nothing from any of them; KPROW0 and
+	 * KPROW1 both fired on their own during boot instead, so they are
+	 * floating rather than wired to a button, and declaring either as a key
+	 * generates phantom presses -- one of them muted the device at boot.
 	 *
-	 * Pin 34 identified by probing the three keypad pins nothing claimed --
-	 * KPROW0, KPROW1 and KPCOL0 -- each with a distinct code, and seeing
-	 * which reported on a press: KPROW1. KPROW0 was dropped because it
-	 * fired on its own during boot, so it is floating rather than wired to
-	 * anything; KPCOL0 never reported at all.
-	 *
-	 * A separate node from the volume keys on purpose: if this pin is ever
-	 * claimed elsewhere, this fails to probe on its own instead of taking
-	 * the volume keys down with it.
+	 * The vendor reaches it through mediatek,mt8163-keypad (KEY_HELP, 0x8a
+	 * in kpd-hw-init-map), and that controller has no driver here, so
+	 * wiring it up means porting the driver rather than adding a gpio-key.
 	 */
-	action_key {
-		compatible = "gpio-keys";
-
-		action@34 {
-			label = "Action Key";
-			linux,code = <0x8a>;
-			gpios = <&pio 0x22 0x01>;
-			debounce-interval = <0x14>;
-		};
-	};
-
 	keys {
 		compatible = "gpio-keys";
 		autorepeat;
