@@ -1593,6 +1593,10 @@
 
 			lp55231@32 {
 				compatible = "ti,lp55231";
+				/* Not populated on radar_puffin: enabling this made the driver probe and
+				   fail with "device detection err: -6" (ENXIO, no ACK on the bus),
+				   so the chip is absent and cannot be the source of any button
+				   lamp. Left disabled so the boot does not log a failed probe. */
 				status = "disabled";
 				reg = <0x32>;
 				clock-mode = [00];
