@@ -3021,6 +3021,33 @@
 		bright-state-gpio = <&pio 0x58 0x01>;
 	};
 
+	/*
+	 * The action button, on KPCOL0. The vendor reaches it through
+	 * mediatek,mt8163-keypad as KEY_HELP (0x8a, the single non-zero entry
+	 * in its kpd-hw-init-map) and that controller has no driver here, so
+	 * the button emitted nothing at all until this node existed.
+	 *
+	 * Identified by counting, not by correlation: all three keypad pins
+	 * nothing else claims were declared with distinct codes, and KPCOL0
+	 * reported 18 times across a window of deliberate presses while KPROW0
+	 * and KPROW1 each fired exactly once during boot and never again.
+	 * Those two are floating; an earlier attempt that trusted one of their
+	 * boot fires wired the wrong pin and the button stayed dead.
+	 *
+	 * Its own node so that if this pin is ever claimed elsewhere it fails
+	 * to probe alone rather than taking the volume keys with it.
+	 */
+	action_key {
+		compatible = "gpio-keys";
+
+		action@36 {
+			label = "Action Key";
+			linux,code = <0x8a>;
+			gpios = <&pio 0x24 0x01>;
+			debounce-interval = <0x14>;
+		};
+	};
+
 	keys {
 		compatible = "gpio-keys";
 		autorepeat;
