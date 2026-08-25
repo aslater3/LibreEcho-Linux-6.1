@@ -13,6 +13,7 @@
 #include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/gpio/consumer.h>
+#include <linux/input.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
@@ -30,6 +31,7 @@ struct amz_privacy {
 	struct priv_cb_data *callbacks[PRIV_CB_MAX];
 	bool disabled;
 	bool hw_latch;
+	bool input_handler_registered;
 	int privacy_mode_status;
 	int shutdown_dialog_status;
 	int cur_priv;
@@ -131,6 +133,91 @@ static int __amz_priv_trigger(struct amz_privacy *priv, int on)
 
 	return 0;
 }
+
+/*
+ * The mute key toggles privacy, and it has to be done here rather than in
+ * userspace: privacy_trigger deliberately refuses to let software leave
+ * privacy, so that no program can silently un-mute a microphone. A physical
+ * key press is the one thing that legitimately may, and only the kernel can
+ * tell a real key press from a write by a process.
+ *
+ * amz_priv_trigger() was already exported for exactly this caller; nothing in
+ * this tree provided one, which is why the button lit privacy on and then
+ * could never turn it off again.
+ */
+static void amz_privacy_input_event(struct input_handle *handle,
+				    unsigned int type, unsigned int code,
+				    int value)
+{
+	struct amz_privacy *priv;
+
+	if (type != EV_KEY || code != KEY_MUTE || value != 1)
+		return;
+
+	mutex_lock(&amz_privacy_lock);
+	priv = amz_privacy_data;
+	if (priv)
+		(void)__amz_priv_trigger(priv, !priv->cur_priv);
+	mutex_unlock(&amz_privacy_lock);
+}
+
+static int amz_privacy_input_connect(struct input_handler *handler,
+				     struct input_dev *dev,
+				     const struct input_device_id *id)
+{
+	struct input_handle *handle;
+	int ret;
+
+	handle = kzalloc(sizeof(*handle), GFP_KERNEL);
+	if (!handle)
+		return -ENOMEM;
+
+	handle->dev = dev;
+	handle->handler = handler;
+	handle->name = "amz_privacy";
+
+	ret = input_register_handle(handle);
+	if (ret)
+		goto err_free;
+	ret = input_open_device(handle);
+	if (ret)
+		goto err_unregister;
+	return 0;
+
+err_unregister:
+	input_unregister_handle(handle);
+err_free:
+	kfree(handle);
+	return ret;
+}
+
+static void amz_privacy_input_disconnect(struct input_handle *handle)
+{
+	input_close_device(handle);
+	input_unregister_handle(handle);
+	kfree(handle);
+}
+
+/* Only devices that actually carry KEY_MUTE, so this does not open every
+   keyboard on the system. */
+static const struct input_device_id amz_privacy_ids[] = {
+	{
+		.flags = INPUT_DEVICE_ID_MATCH_EVBIT |
+			 INPUT_DEVICE_ID_MATCH_KEYBIT,
+		.evbit = { BIT_MASK(EV_KEY) },
+		.keybit = { [BIT_WORD(KEY_MUTE)] = BIT_MASK(KEY_MUTE) },
+	},
+	{ },
+};
+MODULE_DEVICE_TABLE(input, amz_privacy_ids);
+
+static struct input_handler amz_privacy_input_handler = {
+	.event		= amz_privacy_input_event,
+	.connect	= amz_privacy_input_connect,
+	.disconnect	= amz_privacy_input_disconnect,
+	.name		= "amz_privacy",
+	.id_table	= amz_privacy_ids,
+};
 
 int amz_priv_trigger(int on)
 {
@@ -460,14 +547,31 @@ static int amz_privacy_probe(struct platform_device *pdev)
 		}
 	}
 
-	dev_info(dev, "registered (hardware latch %s)\n",
-		 priv->hw_latch ? "enabled" : "disabled");
+	/*
+	 * Registered last: by this point the device can accept a toggle. A
+	 * failure here is not fatal -- privacy still works from sysfs and the
+	 * boot state is correct, only the key stops toggling it -- so say so
+	 * and carry on rather than refusing to probe.
+	 */
+	ret = input_register_handler(&amz_privacy_input_handler);
+	if (ret)
+		dev_warn(dev, "mute key handler not registered (%d); the button cannot leave privacy\n",
+			 ret);
+	else
+		priv->input_handler_registered = true;
+
+	dev_info(dev, "registered (hardware latch %s, mute key %s)\n",
+		 priv->hw_latch ? "enabled" : "disabled",
+		 priv->input_handler_registered ? "bound" : "unbound");
 	return 0;
 }
 
 static int amz_privacy_remove(struct platform_device *pdev)
 {
 	struct amz_privacy *priv = platform_get_drvdata(pdev);
+
+	if (priv->input_handler_registered)
+		input_unregister_handler(&amz_privacy_input_handler);
 
 	sysfs_remove_group(&pdev->dev.kobj, &amz_privacy_group);
 
