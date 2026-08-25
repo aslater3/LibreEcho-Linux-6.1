@@ -156,13 +156,90 @@ first principles:
   1.3 GHz, but it trades idle heat against the ramp latency at the start of a
   voice turn, and this device has a sub-second response budget. That trade needs
   the latency measured on both sides, not asserted.
-- **Trip values tuned to the real envelope.** 85 C is inherited, not chosen. If
-  the part never approaches it in normal use the control loop is decorative; if
-  it sits near it under sustained load, the passive trip belongs lower.
+## The measured envelope
 
-### Measuring the envelope
+Taken on hardware over ADB: 60 s idle, 300 s of four-core load, 120 s cooldown,
+sampled every 2 s.
 
-The characterisation these depend on, to be run on hardware:
+| | Junction | Notes |
+|---|---|---|
+| Idle | **66.7 C** mean (65.3–71.8) | CPU 100 % idle, all four cores pinned at 1.3 GHz |
+| Sustained four-core load | **81.5 C** steady, 81.9 peak | reached 90 % of the rise by t+150 s |
+| Cooldown | 81.4 → 68.8 C in 120 s | |
+| Board thermistor `bts0` | 22.1 → 30.0 C | true value, transform inverted |
+
+**The passive trip never fired.** `cooling_device0/cur_state` stayed at 0 for the
+entire run and the cores never left 1.3 GHz. Peak came 3.1 C short of the 85 C
+trip, so on this workload the control loop is decorative.
+
+The idle figure is the striking one: 66.7 C with the CPU 100 % idle. Nothing is
+computing — that is the cost of holding four cores at their top OPP.
+
+## What the vendor does, for comparison
+
+From a stock Echo Dot 2nd Gen dump (`biscuit`, same MT8163, different board).
+`thermal.policy.conf` is plaintext; `thermal.conf` is obfuscated with a
+per-line `c[i] - (i mod 10)` shift and decodes cleanly.
+
+The kernel zone ladder, `/proc/driver/thermal/tzcpu`:
+
+| Trip | Cooler |
+|---|---|
+| 117000 | `mtktscpu-sysrst` — emergency reset |
+| 100000 | `mtk-cl-shutdown00` |
+| 95000 | `cpu02` |
+| 90000 | `cpu_adaptive_0` |
+| 76000 | `cpu_adaptive_1` |
+| **67000** | `cpu_adaptive_2` |
+
+Poll interval: **250**.
+
+Two things fall out of this. The 117 C critical trip in our tree is not a
+transcription error — it is exactly the vendor's emergency trip. And 250 ms,
+arrived at here from the step_wise reasoning above, is exactly the vendor's poll
+interval for the same zone.
+
+Above that sits a second layer this tree has no equivalent of: `ace_thermald`
+running `thermal.policy.conf`, which throttles on **skin temperature** from a
+`tmp103` sensor across seven trips from 56.5 C to 60.0 C, allocating a power
+budget (2950 → 251 mW) rather than capping frequency.
+
+### What that comparison implies
+
+Measured against the vendor's own ladder, our device would have been throttling
+for **92 %** of the run at the 67 C trip and **62 %** at the 76 C trip. It
+throttled for 0 % of it. Even at idle, 66.7 C sits essentially on the vendor's
+first throttle point.
+
+Two caveats keep this from being a straight verdict. `biscuit` is a Dot — a puck
+with far less thermal mass than this cylinder — and its aggressive band is partly
+about the skin temperature of something people pick up. And its coolers allocate
+a power budget, which degrades far more gently than walking the OPP table.
+
+So the vendor numbers are not values to copy. What they establish is that 85 C
+as the single throttle point is far more permissive than the people who designed
+the hardware intended, and that the gap is large enough to be deliberate rather
+than incidental.
+
+## Still open
+
+- **A graduated passive ladder.** The measurements support adding an
+  intermediate trip: sustained load parks at 81.5 C with no response at all
+  until 85 C. Where to put it is a judgement about heat against response
+  latency, and this device has a sub-second budget to defend.
+- **A different cpufreq governor.** Worth more than the trip values --- 66.7 C at
+  100 % idle is paid continuously for nothing. But `scaling_available_governors`
+  reads `performance` and nothing else: no other governor is compiled in, so
+  this is a kernel config change and a reflash, not a sysfs write. `ttsd`'s
+  `cpu_boost_begin()` is doubly dead as a result --- the boosted state is already
+  permanent, and there is no other governor it could have come from.
+- **Enclosure-temperature protection.** The sensors report real temperatures as
+  of this change, so trips are now possible. Two of the three thermistors read
+  -19.0 C and are almost certainly unpopulated; `bts0` tracks ambient and rose
+  only 8 C across a run that moved the junction 15 C, so it is a poor proxy for
+  the die and a reasonable one for the room. There is no `tmp103` on this board.
+
+### Reproducing the measurement
 
 ```sh
 # Junction and all three board thermistors, once a second.
@@ -176,6 +253,5 @@ while :; do
 done
 ```
 
-Four numbers decide every open item: the idle steady state, the steady state
-under sustained four-core load, how long it takes to get there, and how far the
-thermistors track the junction while it happens.
+Write only to `/tmp`. `/data` has a strict allowlist and an unexpected file
+there halts every service on the next boot, in both A/B slots.
