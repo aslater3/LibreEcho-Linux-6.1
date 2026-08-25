@@ -1038,8 +1038,18 @@
 					mediatek,long-press-mode = <0x01>;
 					power-off-time-sec = <0x00>;
 
+					/*
+					 * This PMIC key is the microphone-mute button, not a power
+					 * button -- the board has no separate power button, and the
+					 * vendor keypad node says so itself with
+					 * mediatek,kpd-sw-pwrkey = <0x71> (KEY_MUTE). Declaring it
+					 * 0x74 (KEY_POWER) made every press arrive under a code
+					 * nothing handles, so mute did nothing and looked like dead
+					 * hardware. Measured: ten presses produced ten KEY_POWER
+					 * events and no other code.
+					 */
 					power {
-						linux,keycodes = <0x74>;
+						linux,keycodes = <0x71>;
 						wakeup-source;
 					};
 
