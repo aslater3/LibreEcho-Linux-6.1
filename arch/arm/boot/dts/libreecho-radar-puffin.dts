@@ -3080,27 +3080,28 @@
 	 * for, this node fails to probe on its own and the volume keys above
 	 * keep working.
 	 */
-	probe_keys {
+	/*
+	 * The action button. The vendor puts it on the keypad matrix as
+	 * KEY_HELP and mediatek,mt8163-keypad has no driver here, so it emitted
+	 * nothing at all until this node existed.
+	 *
+	 * Pin 34 identified by probing the three keypad pins nothing claimed --
+	 * KPROW0, KPROW1 and KPCOL0 -- each with a distinct code, and seeing
+	 * which reported on a press: KPROW1. KPROW0 was dropped because it
+	 * fired on its own during boot, so it is floating rather than wired to
+	 * anything; KPCOL0 never reported at all.
+	 *
+	 * A separate node from the volume keys on purpose: if this pin is ever
+	 * claimed elsewhere, this fails to probe on its own instead of taking
+	 * the volume keys down with it.
+	 */
+	action_key {
 		compatible = "gpio-keys";
 
-		probe_kprow0@33 {
-			label = "Probe KPROW0";
+		action@34 {
+			label = "Action Key";
 			linux,code = <0x8a>;
-			gpios = <&pio 0x21 0x01>;
-			debounce-interval = <0x14>;
-		};
-
-		probe_kprow1@34 {
-			label = "Probe KPROW1";
-			linux,code = <0xb7>;
 			gpios = <&pio 0x22 0x01>;
-			debounce-interval = <0x14>;
-		};
-
-		probe_kpcol0@36 {
-			label = "Probe KPCOL0";
-			linux,code = <0xb8>;
-			gpios = <&pio 0x24 0x01>;
 			debounce-interval = <0x14>;
 		};
 	};
