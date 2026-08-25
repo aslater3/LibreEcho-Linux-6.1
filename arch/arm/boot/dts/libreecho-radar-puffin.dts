@@ -201,21 +201,62 @@
 
 	thermal-zones {
 		cpu-thermal {
-			polling-delay-passive = <0x3e8>;
-			polling-delay = <0x3e8>;
+			/*
+			 * mtk_thermal implements only .get_temp -- it has no
+			 * .set_trips -- so the interrupt this sensor declares is
+			 * never used to signal a trip crossing and polling is the
+			 * only path by which a trip is ever noticed.
+			 *
+			 * That makes this number the entire reaction time. The
+			 * step_wise governor moves exactly one cooling state per
+			 * poll, and this CPU has seven OPPs, so at the original
+			 * 1000 ms it took six seconds to walk from 1.3 GHz down to
+			 * 600 MHz -- and the same six seconds to come back up
+			 * afterwards. On a device whose whole job is answering
+			 * within a second, that recovery cost is as important as
+			 * the protection: a burst of heat left the CPU slow for
+			 * seconds after the heat was gone. At 250 ms the range
+			 * takes 1.5 s in both directions.
+			 *
+			 * Only the passive delay is shortened. Below every trip
+			 * the zone still polls once a second, which is where the
+			 * device spends nearly all of its time.
+			 */
+			polling-delay-passive = <250>;
+			polling-delay = <1000>;
 			thermal-sensors = <&thermal>;
 
+			/*
+			 * Temperatures are in millicelsius and written in decimal
+			 * on purpose. Both trips were hex literals that disagreed
+			 * with the comments next to them -- 0x14ba8 is 84.904 C,
+			 * not the 85 C it claimed, and 0x1c908 is 117 C, not the
+			 * 115 C it claimed. In both cases the value is right and
+			 * the comment was wrong. Decimal makes the number legible
+			 * at a glance so the two cannot drift apart again.
+			 */
 			trips {
 				/* Start throttling CPUfreq at 85 C. */
 				cpu_passive: cpu-passive {
-					temperature = <0x14ba8>;
-					hysteresis = <0x7d0>;
+					temperature = <85000>;
+					hysteresis = <2000>;
 					type = "passive";
 				};
-				/* Emergency power-off at 115 C. */
+				/*
+				 * Emergency power-off, left at the vendor's value.
+				 *
+				 * This looked like a transcription slip -- 117 C
+				 * beside a comment reading 115 C, exactly one
+				 * hysteresis step apart. It is not. Amazon's own
+				 * thermal.conf for the same SoC gives its CPU zone
+				 * an emergency trip of exactly 117000, wired to
+				 * mtktscpu-sysrst, above a shutdown at 100000. The
+				 * value is inherited and deliberate; only the
+				 * comment beside it was ever wrong.
+				 */
 				cpu-critical {
-					temperature = <0x1c908>;
-					hysteresis = <0x7d0>;
+					temperature = <117000>;
+					hysteresis = <2000>;
 					type = "critical";
 				};
 			};
