@@ -3065,6 +3065,46 @@
 		bright-state-gpio = <&pio 0x58 0x01>;
 	};
 
+	/*
+	 * Probing for the action button. The vendor puts it on the keypad
+	 * matrix as 0x8a (KEY_HELP), and mediatek,mt8163-keypad has no driver
+	 * here, so the button currently emits nothing at all -- confirmed by
+	 * capture, with a volume press as a control in the same window.
+	 *
+	 * The volume keys are wired as individual gpio-keys rather than a real
+	 * matrix, so the action button is probably on one of the three keypad
+	 * pins nothing has claimed: KPROW0 (33), KPROW1 (34), KPCOL0 (36).
+	 * Give each a distinct code and see which one reports.
+	 *
+	 * Deliberately a separate node: if one of these GPIOs is already spoken
+	 * for, this node fails to probe on its own and the volume keys above
+	 * keep working.
+	 */
+	probe_keys {
+		compatible = "gpio-keys";
+
+		probe_kprow0@33 {
+			label = "Probe KPROW0";
+			linux,code = <0x8a>;
+			gpios = <&pio 0x21 0x01>;
+			debounce-interval = <0x14>;
+		};
+
+		probe_kprow1@34 {
+			label = "Probe KPROW1";
+			linux,code = <0xb7>;
+			gpios = <&pio 0x22 0x01>;
+			debounce-interval = <0x14>;
+		};
+
+		probe_kpcol0@36 {
+			label = "Probe KPCOL0";
+			linux,code = <0xb8>;
+			gpios = <&pio 0x24 0x01>;
+			debounce-interval = <0x14>;
+		};
+	};
+
 	keys {
 		compatible = "gpio-keys";
 		autorepeat;
