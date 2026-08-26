@@ -38,6 +38,11 @@ DIAG_MARKERS = (
     "MUSB restart diag",
     "MUSB enqueue diag",
     "FFS queue diag",
+    # The recurring DEVCTL state dump. It carries no "diag" in its format
+    # string, so the markers above did not match it and it reached this
+    # branch at info level despite #9 -- a two-second poll printing on every
+    # transition is exactly the flooding this contract exists to prevent.
+    "MT8163 devctl",
 )
 INFO_LEVEL = re.compile(
     r"dev_info(?:_ratelimited)?\s*\(|pr_info(?:_ratelimited)?\s*\("

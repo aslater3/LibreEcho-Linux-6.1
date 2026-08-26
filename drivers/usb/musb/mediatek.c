@@ -274,11 +274,11 @@ static void mt8163_musb_diag_work(struct work_struct *work)
 		if (!glue->devctl_seen || dc != glue->last_devctl) {
 			glue->last_devctl = dc;
 			glue->devctl_seen = true;
-			dev_info(glue->dev,
-				 "MT8163 devctl=%02x bdevice=%u hostmode=%u vbus=%u session=%u role=%s\n",
-				 dc, (dc >> 7) & 1, (dc >> 2) & 1, (dc >> 3) & 3, dc & 1,
-				 glue->role == USB_ROLE_HOST ? "host" :
-				 glue->role == USB_ROLE_DEVICE ? "device" : "none");
+			dev_dbg(glue->dev,
+				"MT8163 devctl=%02x bdevice=%u hostmode=%u vbus=%u session=%u role=%s\n",
+				dc, (dc >> 7) & 1, (dc >> 2) & 1, (dc >> 3) & 3, dc & 1,
+				glue->role == USB_ROLE_HOST ? "host" :
+				glue->role == USB_ROLE_DEVICE ? "device" : "none");
 		}
 	}
 	/* Keep watching. The worker was a one-shot, so it reported once ten
