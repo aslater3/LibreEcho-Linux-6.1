@@ -556,26 +556,38 @@ static int mtk_otg_switch_set(struct mtk_glue *glue, enum usb_role role)
 		 */
 		glue->role = USB_ROLE_HOST;
 		musb_start(musb);
-		if (glue->data->needs_soc_phy_recover && glue->phy_base)
+		/*
+		 * Everything below is the MT8163 session-edge workaround, and
+		 * all of it reaches the SoC PHY through glue->phy_base.  The
+		 * MT2701 and MT7623 OTG nodes in this tree bind through the
+		 * generic "mediatek,mtk-musb" fallback, where
+		 * needs_soc_phy_recover is false and phy_base was never mapped,
+		 * so the first PHY access here would fault the kernel on a role
+		 * switch.  musb_start() above is the generic path, and is all
+		 * those controllers need.
+		 */
+		if (glue->data->needs_soc_phy_recover && glue->phy_base) {
 			mt8163_usb_phy_set_role(glue, true);
-		/*
-		 * musb_start() folds its clear-then-maybe-set of the session
-		 * bit into one register write, so when SESSION already reads
-		 * 1 -- which it always does here, the forced BVALID has kept
-		 * a B-session alive since boot -- the controller never sees a
-		 * session edge and never re-latches the role.  Cycle the
-		 * session for real, with the PHY reporting session-end so the
-		 * clear actually sticks.
-		 */
-		mt8163_musb_restart_session_as_host(glue);
-		/*
-		 * If the restart raised CONNECT the port is already occupied
-		 * and the rescan below returns without touching it; it stays
-		 * only as a fallback for a controller that latched host mode
-		 * without noticing the resident pullup.
-		 */
-		msleep(100);
-		mt8163_musb_rescan_port(glue);
+			/*
+			 * musb_start() folds its clear-then-maybe-set of the
+			 * session bit into one register write, so when SESSION
+			 * already reads 1 -- which it always does here, the
+			 * forced BVALID has kept a B-session alive since boot --
+			 * the controller never sees a session edge and never
+			 * re-latches the role.  Cycle the session for real, with
+			 * the PHY reporting session-end so the clear actually
+			 * sticks.
+			 */
+			mt8163_musb_restart_session_as_host(glue);
+			/*
+			 * If the restart raised CONNECT the port is already
+			 * occupied and the rescan below returns without touching
+			 * it; it stays only as a fallback for a controller that
+			 * latched host mode without noticing the resident pullup.
+			 */
+			msleep(100);
+			mt8163_musb_rescan_port(glue);
+		}
 		break;
 	case USB_ROLE_DEVICE:
 		musb->xceiv->otg->state = OTG_STATE_B_IDLE;
