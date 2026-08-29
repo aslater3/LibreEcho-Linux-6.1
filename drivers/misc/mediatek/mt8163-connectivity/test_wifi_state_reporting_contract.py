@@ -17,6 +17,10 @@ GL_WEXT = ROOT / (
     "drivers/misc/mediatek/mt8163-connectivity/conn_soc/drv_wlan/"
     "mt_wifi/wlan/os/linux/gl_wext.c"
 )
+GL_KAL = ROOT / (
+    "drivers/misc/mediatek/mt8163-connectivity/conn_soc/drv_wlan/"
+    "mt_wifi/wlan/os/linux/gl_kal.c"
+)
 AIS_FSM = ROOT / (
     "drivers/misc/mediatek/mt8163-connectivity/conn_soc/drv_wlan/"
     "mt_wifi/wlan/mgmt/ais_fsm.c"
@@ -79,6 +83,27 @@ class WifiStateReportingContractTests(unittest.TestCase):
         self.assertIn(state_guard, function)
         self.assertIn("memset(prAddr->sa_data, 0, ETH_ALEN);", function)
         self.assertLess(function.index(state_guard), function.index(query))
+
+    def test_local_disconnect_notifies_cfg80211(self) -> None:
+        source = GL_KAL.read_text(encoding="utf-8")
+        disconnect = source.split(
+            "case WLAN_STATUS_MEDIA_DISCONNECT:", 1
+        )[1].split(
+            "prGlueInfo->eParamMediaStateIndicated = "
+            "PARAM_MEDIA_STATE_DISCONNECTED;", 1
+        )[0]
+
+        self.assertIn("case WLAN_STATUS_MEDIA_DISCONNECT_LOCALLY:", disconnect)
+        self.assertIn(
+            "if (prGlueInfo->fgIsRegistered == TRUE) {", disconnect
+        )
+        self.assertNotIn(
+            "&& eStatus == WLAN_STATUS_MEDIA_DISCONNECT", disconnect
+        )
+        self.assertIn(
+            "eStatus == WLAN_STATUS_MEDIA_DISCONNECT_LOCALLY", disconnect
+        )
+        self.assertEqual(disconnect.count("cfg80211_disconnected("), 1)
 
     def test_auth_timeout_recovery_resets_divergence_before_retry(self) -> None:
         source = AIS_FSM.read_text(encoding="utf-8")
