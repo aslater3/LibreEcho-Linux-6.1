@@ -10,15 +10,19 @@
  */
 
 #include <linux/amz_priv.h>
+#include <linux/atomic.h>
 #include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/gpio/consumer.h>
+#include <linux/input.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
 #include <linux/sysfs.h>
+#include <linux/string.h>
+#include <linux/workqueue.h>
 
 #define DRIVER_NAME "amz_privacy"
 
@@ -30,6 +34,7 @@ struct amz_privacy {
 	struct priv_cb_data *callbacks[PRIV_CB_MAX];
 	bool disabled;
 	bool hw_latch;
+	bool input_handler_registered;
 	int privacy_mode_status;
 	int shutdown_dialog_status;
 	int cur_priv;
@@ -131,6 +136,126 @@ static int __amz_priv_trigger(struct amz_privacy *priv, int on)
 
 	return 0;
 }
+
+/*
+ * The mute key toggles privacy, and it has to be done here rather than in
+ * userspace: privacy_trigger deliberately refuses to let software leave
+ * privacy, so that no program can silently un-mute a microphone. A physical
+ * key press is the one thing that legitimately may, and only the kernel can
+ * tell a real key press from a write by a process.
+ *
+ * amz_priv_trigger() was already exported for exactly this caller; nothing in
+ * this tree provided one, which is why the button lit privacy on and then
+ * could never turn it off again.
+ *
+ * The toggle cannot run in the handler itself. input_pass_values() calls
+ * handler->event() with dev->event_lock held and interrupts disabled, so this
+ * is atomic context, and every step of a toggle sleeps: amz_privacy_lock is a
+ * mutex, the lines are driven with the gpiod_*_cansleep() family, and
+ * amz_privacy_assert_latch() waits for the hardware with usleep_range(). Count
+ * the press here and let a workqueue do the work.
+ *
+ * Presses are counted rather than flagged because schedule_work() on an
+ * already-queued item does nothing. A second press arriving before the first
+ * had been handled would be swallowed, and since this is a toggle, a swallowed
+ * press leaves privacy in the opposite state to the one the user asked for.
+ */
+static atomic_t amz_privacy_pending_presses = ATOMIC_INIT(0);
+
+static void amz_privacy_toggle_work(struct work_struct *work)
+{
+	struct amz_privacy *priv;
+	int pending = atomic_xchg(&amz_privacy_pending_presses, 0);
+
+	if (pending <= 0)
+		return;
+
+	mutex_lock(&amz_privacy_lock);
+	priv = amz_privacy_data;
+	if (priv)
+		while (pending--)
+			(void)__amz_priv_trigger(priv, !priv->cur_priv);
+	mutex_unlock(&amz_privacy_lock);
+}
+
+static DECLARE_WORK(amz_privacy_toggle, amz_privacy_toggle_work);
+
+static void amz_privacy_input_event(struct input_handle *handle,
+				    unsigned int type, unsigned int code,
+				    int value)
+{
+	if (type != EV_KEY || code != KEY_MUTE || value != 1)
+		return;
+
+	/*
+	 * Counted before queueing: if the worker is between its atomic_xchg()
+	 * and finishing, this press is not lost, because the item is no longer
+	 * queued and schedule_work() will run it again.
+	 */
+	atomic_inc(&amz_privacy_pending_presses);
+	schedule_work(&amz_privacy_toggle);
+}
+
+static int amz_privacy_input_connect(struct input_handler *handler,
+				     struct input_dev *dev,
+				     const struct input_device_id *id)
+{
+	struct input_handle *handle;
+	int ret;
+
+	if (strcmp(dev->name, "mtk-pmic-keys"))
+		return -ENODEV;
+
+	handle = kzalloc(sizeof(*handle), GFP_KERNEL);
+	if (!handle)
+		return -ENOMEM;
+
+	handle->dev = dev;
+	handle->handler = handler;
+	handle->name = "amz_privacy";
+
+	ret = input_register_handle(handle);
+	if (ret)
+		goto err_free;
+	ret = input_open_device(handle);
+	if (ret)
+		goto err_unregister;
+	return 0;
+
+err_unregister:
+	input_unregister_handle(handle);
+err_free:
+	kfree(handle);
+	return ret;
+}
+
+static void amz_privacy_input_disconnect(struct input_handle *handle)
+{
+	input_close_device(handle);
+	input_unregister_handle(handle);
+	kfree(handle);
+}
+
+/* Only devices that actually carry KEY_MUTE, so this does not open every
+   keyboard on the system. */
+static const struct input_device_id amz_privacy_ids[] = {
+	{
+		.flags = INPUT_DEVICE_ID_MATCH_EVBIT |
+				 INPUT_DEVICE_ID_MATCH_KEYBIT,
+		.evbit = { BIT_MASK(EV_KEY) },
+		.keybit = { [BIT_WORD(KEY_MUTE)] = BIT_MASK(KEY_MUTE) },
+	},
+	{ },
+};
+MODULE_DEVICE_TABLE(input, amz_privacy_ids);
+
+static struct input_handler amz_privacy_input_handler = {
+	.event		= amz_privacy_input_event,
+	.connect	= amz_privacy_input_connect,
+	.disconnect	= amz_privacy_input_disconnect,
+	.name		= "amz_privacy",
+	.id_table	= amz_privacy_ids,
+};
 
 int amz_priv_trigger(int on)
 {
@@ -380,6 +505,12 @@ static int amz_privacy_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, ret,
 				     "failed to configure privacy GPIO\n");
 
+	ret = gpiod_get_raw_value_cansleep(priv->privacy_gpio);
+	if (ret < 0)
+		return dev_err_probe(dev, ret,
+				     "failed to read privacy GPIO\n");
+	priv->cur_priv = !!ret;
+
 	priv->bright_state_gpio =
 		amz_privacy_get_optional_gpio(dev, "bright-state-gpio",
 					      GPIOD_ASIS,
@@ -460,14 +591,40 @@ static int amz_privacy_probe(struct platform_device *pdev)
 		}
 	}
 
-	dev_info(dev, "registered (hardware latch %s)\n",
-		 priv->hw_latch ? "enabled" : "disabled");
+	/*
+	 * Registered last: by this point the device can accept a toggle. A
+	 * failure here is not fatal -- privacy still works from sysfs and the
+	 * boot state is correct, only the key stops toggling it -- so say so
+	 * and carry on rather than refusing to probe.
+	 */
+	ret = input_register_handler(&amz_privacy_input_handler);
+	if (ret)
+		dev_warn(dev, "mute key handler not registered (%d); the button cannot leave privacy\n",
+			 ret);
+	else
+		priv->input_handler_registered = true;
+
+	dev_info(dev, "registered (hardware latch %s, mute key %s)\n",
+		 priv->hw_latch ? "enabled" : "disabled",
+		 priv->input_handler_registered ? "bound" : "unbound");
 	return 0;
 }
 
 static int amz_privacy_remove(struct platform_device *pdev)
 {
 	struct amz_privacy *priv = platform_get_drvdata(pdev);
+
+	if (priv->input_handler_registered)
+		input_unregister_handler(&amz_privacy_input_handler);
+
+	/*
+	 * The handler is gone, so no further presses can be counted; drain the
+	 * ones already queued before the singleton is cleared, and drop any
+	 * that were counted but never ran so a later probe does not inherit
+	 * them.
+	 */
+	cancel_work_sync(&amz_privacy_toggle);
+	atomic_set(&amz_privacy_pending_presses, 0);
 
 	sysfs_remove_group(&pdev->dev.kobj, &amz_privacy_group);
 
