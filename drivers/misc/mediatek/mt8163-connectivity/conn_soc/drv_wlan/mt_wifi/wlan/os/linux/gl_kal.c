@@ -1736,7 +1736,9 @@ kalIndicateStatusAndComplete(IN P_GLUE_INFO_T prGlueInfo, IN WLAN_STATUS eStatus
 			/* CFG80211 Indication */
 			DBGLOG(AIS, INFO, "[wifi] %s cfg80211_disconnected\n", prGlueInfo->prDevHandler->name);
 			cfg80211_disconnected(prGlueInfo->prDevHandler,
-					      u2DeauthReason, NULL, 0,
+					      eStatus == WLAN_STATUS_MEDIA_DISCONNECT_LOCALLY ?
+					      WLAN_REASON_UNSPECIFIED : u2DeauthReason,
+					      NULL, 0,
 					      eStatus == WLAN_STATUS_MEDIA_DISCONNECT_LOCALLY,
 					      GFP_KERNEL);
 		}

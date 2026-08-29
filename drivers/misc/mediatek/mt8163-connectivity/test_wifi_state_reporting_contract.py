@@ -103,6 +103,11 @@ class WifiStateReportingContractTests(unittest.TestCase):
         self.assertIn(
             "eStatus == WLAN_STATUS_MEDIA_DISCONNECT_LOCALLY", disconnect
         )
+        self.assertRegex(
+            disconnect,
+            r"eStatus\s*==\s*WLAN_STATUS_MEDIA_DISCONNECT_LOCALLY\s*\?\s*"
+            r"WLAN_REASON_UNSPECIFIED\s*:\s*u2DeauthReason",
+        )
         self.assertEqual(disconnect.count("cfg80211_disconnected("), 1)
 
     def test_auth_timeout_recovery_resets_divergence_before_retry(self) -> None:
