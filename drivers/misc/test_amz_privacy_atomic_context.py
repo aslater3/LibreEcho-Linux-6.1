@@ -118,6 +118,21 @@ def main():
                 "amz_privacy_input_connect() must reject non-PMIC input devices"
             )
 
+    probe = function_body(text, "static int amz_privacy_probe(")
+    if probe is None:
+        failures.append("amz_privacy_probe() not found")
+    elif not re.search(
+        r"amz_privacy_preserve_output\(priv->privacy_gpio\).*?"
+        r"gpiod_get_raw_value_cansleep\(priv->privacy_gpio\).*?"
+        r"priv->cur_priv\s*=\s*!!ret",
+        probe,
+        re.DOTALL,
+    ):
+        failures.append(
+            "amz_privacy_probe() must initialize cur_priv from the preserved "
+            "privacy GPIO"
+        )
+
     worker = function_body(text, "static void amz_privacy_toggle_work(")
     if worker is None:
         failures.append("amz_privacy_toggle_work() not found")

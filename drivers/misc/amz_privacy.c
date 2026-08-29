@@ -505,6 +505,12 @@ static int amz_privacy_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, ret,
 				     "failed to configure privacy GPIO\n");
 
+	ret = gpiod_get_raw_value_cansleep(priv->privacy_gpio);
+	if (ret < 0)
+		return dev_err_probe(dev, ret,
+				     "failed to read privacy GPIO\n");
+	priv->cur_priv = !!ret;
+
 	priv->bright_state_gpio =
 		amz_privacy_get_optional_gpio(dev, "bright-state-gpio",
 					      GPIOD_ASIS,
