@@ -236,8 +236,10 @@ static void amz_privacy_input_disconnect(struct input_handle *handle)
    keyboard on the system. */
 static const struct input_device_id amz_privacy_ids[] = {
 	{
-		.flags = INPUT_DEVICE_ID_MATCH_EVBIT |
-			 INPUT_DEVICE_ID_MATCH_KEYBIT,
+		.flags = INPUT_DEVICE_ID_MATCH_NAME |
+				 INPUT_DEVICE_ID_MATCH_EVBIT |
+				 INPUT_DEVICE_ID_MATCH_KEYBIT,
+		.name = "mtk-pmic-keys",
 		.evbit = { BIT_MASK(EV_KEY) },
 		.keybit = { [BIT_WORD(KEY_MUTE)] = BIT_MASK(KEY_MUTE) },
 	},
