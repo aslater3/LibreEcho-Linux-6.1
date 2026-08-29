@@ -21,6 +21,7 @@
 #include <linux/platform_device.h>
 #include <linux/property.h>
 #include <linux/sysfs.h>
+#include <linux/string.h>
 #include <linux/workqueue.h>
 
 #define DRIVER_NAME "amz_privacy"
@@ -202,6 +203,9 @@ static int amz_privacy_input_connect(struct input_handler *handler,
 	struct input_handle *handle;
 	int ret;
 
+	if (strcmp(dev->name, "mtk-pmic-keys"))
+		return -ENODEV;
+
 	handle = kzalloc(sizeof(*handle), GFP_KERNEL);
 	if (!handle)
 		return -ENOMEM;
@@ -236,10 +240,8 @@ static void amz_privacy_input_disconnect(struct input_handle *handle)
    keyboard on the system. */
 static const struct input_device_id amz_privacy_ids[] = {
 	{
-		.flags = INPUT_DEVICE_ID_MATCH_NAME |
-				 INPUT_DEVICE_ID_MATCH_EVBIT |
+		.flags = INPUT_DEVICE_ID_MATCH_EVBIT |
 				 INPUT_DEVICE_ID_MATCH_KEYBIT,
-		.name = "mtk-pmic-keys",
 		.evbit = { BIT_MASK(EV_KEY) },
 		.keybit = { [BIT_WORD(KEY_MUTE)] = BIT_MASK(KEY_MUTE) },
 	},

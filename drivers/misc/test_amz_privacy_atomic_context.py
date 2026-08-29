@@ -21,8 +21,8 @@ This contract asserts:
    the opposite state to the one the user asked for.
 5. Driver removal drains the queued work, so a toggle cannot run against a
    device that is going away.
-6. The input ID table matches the PMIC key device identity, not every device
-   that happens to advertise KEY_MUTE.
+6. The input handler rejects non-PMIC devices before attaching, rather than
+   treating every device that advertises KEY_MUTE as the privacy control.
 
 Run from the kernel source root:
 
@@ -104,15 +104,18 @@ def main():
     ids = function_body(text, "static const struct input_device_id amz_privacy_ids[]")
     if ids is None:
         failures.append("amz_privacy_ids[] not found")
+    elif "KEY_MUTE" not in ids or "INPUT_DEVICE_ID_MATCH_KEYBIT" not in ids:
+        failures.append(
+            "amz_privacy_ids[] must retain the KEY_MUTE capability match"
+        )
+
+    connect = function_body(text, "static int amz_privacy_input_connect(")
+    if connect is None:
+        failures.append("amz_privacy_input_connect() not found")
     else:
-        if "INPUT_DEVICE_ID_MATCH_NAME" not in ids:
+        if 'strcmp(dev->name, "mtk-pmic-keys")' not in connect:
             failures.append(
-                "amz_privacy_ids[] must match the PMIC input device name so "
-                "generic HID KEY_MUTE devices are rejected"
-            )
-        if not re.search(r'\.name\s*=\s*"mtk-pmic-keys"', ids):
-            failures.append(
-                "amz_privacy_ids[] must identify the mtk-pmic-keys input device"
+                "amz_privacy_input_connect() must reject non-PMIC input devices"
             )
 
     worker = function_body(text, "static void amz_privacy_toggle_work(")
