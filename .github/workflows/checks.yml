@@ -89,6 +89,9 @@ jobs:
       - name: Run MT8163 console diag contract
         run: python3 drivers/usb/musb/test_mt8163_console_diag_contract.py
 
+      - name: Run MT8163 role-switch contract
+        run: python3 drivers/usb/musb/test_mt8163_role_switch_contract.py
+
       - name: Run amz_privacy atomic-context contract
         run: python3 drivers/misc/test_amz_privacy_atomic_context.py
 
@@ -116,6 +119,13 @@ jobs:
           test -s "$out/arch/arm/boot/dts/libreecho-radar-puffin.dtb"
           test -s "$out/System.map"
           grep -qx 'CONFIG_CFG80211_WEXT=y' "$out/.config"
+          # The MUSB role is a Kconfig choice, so it can be re-resolved by
+          # olddefconfig.  Gadget-only makes mtk_musb_probe() overwrite the
+          # device tree's dr_mode with USB_DR_MODE_PERIPHERAL, which drops the
+          # host objects and the OTG role switch: host mode then cannot be
+          # selected at all.  Assert the resolved config, not the defconfig.
+          grep -qx 'CONFIG_USB_MUSB_DUAL_ROLE=y' "$out/.config"
+          ! grep -qx 'CONFIG_USB_MUSB_GADGET=y' "$out/.config"
           git diff --check
 
       - name: Upload kernel build outputs

@@ -878,34 +878,36 @@
 
 				pins_cmd_dat {
 					pinmux = <0x2602>;
-					slew-rate = <0x00>;
 					bias-pull-up = <0x00>;
 				};
 			};
 
 			drvvbus_init {
+				linux,phandle = <0x80>;
+				phandle = <0x80>;
 
 				pins_cmd_dat {
-					pinmux = <0x2302>;
-					slew-rate = <0x01>;
-					bias-pull-up = <0x00>;
+					pinmux = <0x2300>;
+					output-low;
 				};
 			};
 
 			drvvbus_low {
+				linux,phandle = <0x81>;
+				phandle = <0x81>;
 
 				pins_cmd_dat {
-					pinmux = <0x2302>;
-					slew-rate = <0x01>;
+					pinmux = <0x2300>;
 					output-low;
 				};
 			};
 
 			drvvbus_high {
+				linux,phandle = <0x82>;
+				phandle = <0x82>;
 
 				pins_cmd_dat {
-					pinmux = <0x2302>;
-					slew-rate = <0x01>;
+					pinmux = <0x2300>;
 					output-high;
 				};
 			};
@@ -2168,8 +2170,8 @@
 			reg = <0x00 0x11200000 0x00 0x10000 0x00 0x11210000 0x00 0x10000>;
 			interrupts = <0x00 0x48 0x08>;
 			interrupt-names = "mc";
-			dr_mode = "peripheral";
-			mode = <0x02>;
+			dr_mode = "otg";
+			mode = <0x03>;
 			multipoint = <0x01>;
 			dyn_fifo = <0x01>;
 			soft_con = <0x01>;
@@ -2179,7 +2181,49 @@
 			clocks = <0x2d 0x02 0x05 0x17 0x05 0x07 0x05 0x08>;
 			clock-names = "usbpll\0usbmcu\0usb\0icusb";
 			vusb-supply = <0x2e>;
-			pinctrl-names = "iddig_irq_init";
+			/*
+			 * No drvvbus states on radar_puffin.
+			 *
+			 * They claim pinmux <0x2300> -- pin 35, GPIO -- and drive it
+			 * low. On this board pin 35 is not USB_DRVVBUS: it is the
+			 * enable line for the microphone array codecs,
+			 *
+			 *     tlv320aic3101@18 { enable-gpio = <&pio 0x23 0x00>; }
+			 *
+			 * so selecting drvvbus_init or drvvbus_low at probe held all
+			 * four mic codecs disabled. Every I2C write to them failed
+			 * with -EIO, the capture FPGA reported frames=0, and waked
+			 * exited on an empty stream -- the wake word simply stopped
+			 * working, with nothing in the USB logs to suggest why.
+			 *
+			 * This costs USB host storage, and that trade is deliberate.
+			 * Measured on hardware, varying only these states:
+			 *
+			 *   init  low   high  | mic    storage
+			 *   ------------------+----------------
+			 *   (states unwired)  | works  dead
+			 *   high  high  high  | works  dead
+			 *   high  low   high  | dead   dead
+			 *   low   low   high  | dead   works     <- the original
+			 *
+			 * Storage only ever works when pin 35 is low at probe, and the
+			 * codecs only survive when it is never low. One pin, two
+			 * consumers, opposite requirements at the same moment -- so on
+			 * this board they are mutually exclusive, and the microphone
+			 * wins because a smart speaker that cannot hear is not one.
+			 *
+			 * A steady high does not buy storage back: config two above has
+			 * the pin asserted throughout and the drive still does not
+			 * enumerate, so this is not a matter of the drive missing a
+			 * VBUS rise. Nor is it a measurement artefact -- every row was
+			 * sampled past the 60s boot gate with usb_role confirmed host.
+			 *
+			 * Getting both would need the codecs re-probed after the pin is
+			 * raised (unbind/rebind tlv320aic3101 once the drive is up),
+			 * which is untested. The driver already treats these states'
+			 * absence as "the port cannot source VBUS" and carries on.
+			 */
+			pinctrl-names = "default";
 			pinctrl-0 = <0x2f>;
 			iddig_gpio = <&pio 0x26 0x00>;
 			status = "okay";
