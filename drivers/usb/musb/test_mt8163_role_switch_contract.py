@@ -47,6 +47,10 @@ def main():
     worker = function_body(text, "static void mtk_musb_mode_work(")
     transition = function_body(text, "static int mtk_otg_switch_set(")
     restore = function_body(text, "static void mtk_musb_restore_gadget_pullup(")
+    rescan = function_body(text, "static void mt8163_musb_rescan_port(")
+    clear_synthetic = function_body(
+        text, "static void mt8163_musb_clear_synthetic_connection("
+    )
 
     if callback is None:
         failures.append("mtk_musb_set_mode() not found")
@@ -82,20 +86,51 @@ def main():
         failures.append(
             "device-role transition must restore the requested gadget pull-up"
         )
+    elif "mt8163_musb_clear_synthetic_connection" not in transition:
+        failures.append("role transition must clear fabricated connection state")
 
     if restore is None:
         failures.append("mtk_musb_restore_gadget_pullup() not found")
     else:
-        for fragment in ("musb->softconnect", "MUSB_POWER_SOFTCONN", "musb_writeb"):
+        for fragment in (
+            "musb->softconnect",
+            "MUSB_POWER_SOFTCONN",
+            "musb_writeb",
+            "spin_lock_irqsave",
+        ):
             if fragment not in restore:
                 failures.append(
                     f"gadget pull-up restore lacks required state/register step: {fragment}"
                 )
 
+    if clear_synthetic is None:
+        failures.append("synthetic connection cleanup helper not found")
+    else:
+        for fragment in ("spin_lock_irqsave", "synthetic_connection",
+                         "USB_PORT_STAT_ENABLE"):
+            if fragment not in clear_synthetic:
+                failures.append(
+                    f"synthetic connection cleanup lacks required guard: {fragment}"
+                )
+
+    if rescan is None:
+        failures.append("mt8163_musb_rescan_port() not found")
+    else:
+        for fragment in ("spin_lock_irqsave", "synthetic_connection",
+                         "schedule_delayed_work"):
+            if fragment not in rescan:
+                failures.append(
+                    f"synthetic rescan lacks required state step: {fragment}"
+                )
+
     if "cancel_work_sync(&glue->mode_work)" not in text:
         failures.append("role-switch worker is not cancelled during teardown")
+    if "cancel_delayed_work_sync(&glue->rescan_cleanup_work)" not in text:
+        failures.append("synthetic rescan cleanup is not cancelled during teardown")
     if "INIT_WORK(&glue->mode_work, mtk_musb_mode_work)" not in text:
         failures.append("role-switch worker is not initialized")
+    if "INIT_DELAYED_WORK(&glue->rescan_cleanup_work," not in text:
+        failures.append("synthetic rescan cleanup is not initialized")
 
     if failures:
         print("MT8163 role-switch contract: FAIL")

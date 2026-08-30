@@ -95,12 +95,14 @@ struct mtk_glue {
 	bool devctl_seen;
 	struct pinctrl_state *vbus_off;
 	struct delayed_work diag_work;
+	struct delayed_work rescan_cleanup_work;
 	struct mutex role_lock;
 	spinlock_t mode_lock;
 	struct work_struct mode_work;
 	enum usb_role pending_role;
 	bool mode_pending;
 	bool mode_work_running;
+	bool synthetic_connection;
 };
 
 #define MT8163_USB_PHY_BANK_OFFSET	0x800
@@ -412,9 +414,44 @@ static void mt8163_musb_restart_session_as_host(struct mtk_glue *glue)
 		 (devctl >> 3) & 3, devctl & 1, i);
 }
 
+static void mt8163_musb_clear_synthetic_connection(struct mtk_glue *glue)
+{
+	struct musb *musb = glue->musb;
+	unsigned long flags;
+	bool cleared = false;
+
+	spin_lock_irqsave(&musb->lock, flags);
+	if (glue->synthetic_connection &&
+	    !(musb->port1_status & USB_PORT_STAT_ENABLE)) {
+		musb->port1_status &= ~(USB_PORT_STAT_CONNECTION |
+					USB_PORT_STAT_C_CONNECTION |
+					USB_PORT_STAT_LOW_SPEED |
+					USB_PORT_STAT_HIGH_SPEED);
+		glue->synthetic_connection = false;
+		cleared = true;
+	} else if (glue->synthetic_connection) {
+		/* Enumeration succeeded; this is now a genuine connection. */
+		glue->synthetic_connection = false;
+	}
+	spin_unlock_irqrestore(&musb->lock, flags);
+
+	if (cleared && musb->hcd)
+		usb_hcd_poll_rh_status(musb->hcd);
+}
+
+static void mt8163_musb_rescan_cleanup_work(struct work_struct *work)
+{
+	struct mtk_glue *glue = container_of(to_delayed_work(work),
+					     struct mtk_glue,
+					     rescan_cleanup_work);
+
+	mt8163_musb_clear_synthetic_connection(glue);
+}
+
 static void mt8163_musb_rescan_port(struct mtk_glue *glue)
 {
 	struct musb *musb = glue->musb;
+	unsigned long flags;
 	u8 devctl;
 
 	if (!musb || !musb->hcd)
@@ -429,7 +466,9 @@ static void mt8163_musb_rescan_port(struct mtk_glue *glue)
 	 * cycle this board cannot perform. Observed as an immediate
 	 * "USB disconnect, device number N" followed by descriptor timeouts.
 	 */
+	spin_lock_irqsave(&musb->lock, flags);
 	if (musb->port1_status & USB_PORT_STAT_CONNECTION) {
+		spin_unlock_irqrestore(&musb->lock, flags);
 		dev_info(glue->dev,
 			 "MT8163 rescan skipped: port already has a device\n");
 		return;
@@ -453,9 +492,11 @@ static void mt8163_musb_rescan_port(struct mtk_glue *glue)
 				| (USB_PORT_STAT_C_CONNECTION << 16);
 	if (devctl & MUSB_DEVCTL_LSDEV)
 		musb->port1_status |= USB_PORT_STAT_LOW_SPEED;
+	glue->synthetic_connection = true;
 
 	musb_set_state(musb, OTG_STATE_A_HOST);
 	musb->is_active = 1;
+	spin_unlock_irqrestore(&musb->lock, flags);
 
 	dev_info(glue->dev, "MT8163 rescan: port1_status=%08x devctl=%02x rh_state=%d\n",
 		 musb->port1_status, devctl, musb->hcd->state);
@@ -468,21 +509,25 @@ static void mt8163_musb_rescan_port(struct mtk_glue *glue)
 	 */
 	usb_hcd_resume_root_hub(musb->hcd);
 	usb_hcd_poll_rh_status(musb->hcd);
+	schedule_delayed_work(&glue->rescan_cleanup_work,
+			      msecs_to_jiffies(5000));
 }
 
 static void mtk_musb_restore_gadget_pullup(struct musb *musb)
 {
+	unsigned long flags;
 	u8 power;
 
+	spin_lock_irqsave(&musb->lock, flags);
 	/* Preserve the gadget driver's requested connection across host mode. */
-	if (!musb->softconnect)
-		return;
-
-	power = readb(musb->mregs + MUSB_POWER);
-	if (!(power & MUSB_POWER_SOFTCONN)) {
-		power |= MUSB_POWER_SOFTCONN;
-		musb_writeb(musb->mregs, MUSB_POWER, power);
+	if (musb->softconnect) {
+		power = readb(musb->mregs + MUSB_POWER);
+		if (!(power & MUSB_POWER_SOFTCONN)) {
+			power |= MUSB_POWER_SOFTCONN;
+			musb_writeb(musb->mregs, MUSB_POWER, power);
+		}
 	}
+	spin_unlock_irqrestore(&musb->lock, flags);
 }
 
 static int mtk_otg_switch_set(struct mtk_glue *glue, enum usb_role role)
@@ -617,6 +662,7 @@ static int mtk_otg_switch_set(struct mtk_glue *glue, enum usb_role role)
 		}
 		break;
 	case USB_ROLE_DEVICE:
+		mt8163_musb_clear_synthetic_connection(glue);
 		musb->xceiv->otg->state = OTG_STATE_B_IDLE;
 		glue->phy_mode = PHY_MODE_USB_DEVICE;
 		new_role = USB_ROLE_DEVICE;
@@ -629,6 +675,7 @@ static int mtk_otg_switch_set(struct mtk_glue *glue, enum usb_role role)
 		mtk_musb_restore_gadget_pullup(musb);
 		break;
 	case USB_ROLE_NONE:
+		mt8163_musb_clear_synthetic_connection(glue);
 		glue->phy_mode = PHY_MODE_USB_OTG;
 		new_role = USB_ROLE_NONE;
 		devctl &= ~MUSB_DEVCTL_SESSION;
@@ -952,6 +999,7 @@ static int mtk_musb_exit(struct musb *musb)
 	struct device *dev = musb->controller;
 	struct mtk_glue *glue = dev_get_drvdata(dev->parent);
 
+	cancel_delayed_work_sync(&glue->rescan_cleanup_work);
 	cancel_work_sync(&glue->mode_work);
 	if (musb->port_mode == MUSB_OTG)
 		mtk_otg_switch_exit(glue);
@@ -1038,6 +1086,8 @@ static int mtk_musb_probe(struct platform_device *pdev)
 	mutex_init(&glue->role_lock);
 	spin_lock_init(&glue->mode_lock);
 	INIT_WORK(&glue->mode_work, mtk_musb_mode_work);
+	INIT_DELAYED_WORK(&glue->rescan_cleanup_work,
+			  mt8163_musb_rescan_cleanup_work);
 	INIT_DELAYED_WORK(&glue->diag_work, mt8163_musb_diag_work);
 	pdata = devm_kzalloc(dev, sizeof(*pdata), GFP_KERNEL);
 	if (!pdata)
