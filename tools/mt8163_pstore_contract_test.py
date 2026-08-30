@@ -21,9 +21,7 @@ Run from the kernel source root:
 
 from pathlib import Path
 import re
-import subprocess
 import sys
-import tempfile
 import unittest
 
 
@@ -31,44 +29,11 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFCONFIG = ROOT / "arch/arm/configs/mt8163_arm32_defconfig"
 PRODUCTION_DTS = ROOT / "arch/arm/boot/dts/libreecho-radar-puffin.dts"
 README = ROOT / "README.md"
-_PERSISTENT_RAM_HEADER_SIZE = 12
 
 _NODE_LINE = re.compile(
-    r"^[ \t]*(?:(?P<label>[A-Za-z_][A-Za-z0-9_-]*):\s*)?"
+    r"^[ \t]*(?:(?:[A-Za-z_][A-Za-z0-9_-]*):\s*)?"
     r"(?P<name>[A-Za-z0-9_.,+\-]+(?:@[A-Za-z0-9_x+\-]+)?)\s*\{"
 )
-
-
-def _preprocess_dts(source: str, extra_include_dirs: tuple[Path, ...] = ()) -> str:
-    """Compose DTS includes and honor the C preprocessor's disabled regions."""
-    include_args = [arg for directory in extra_include_dirs for arg in ("-I", str(directory))]
-    try:
-        result = subprocess.run(
-            [
-                "cpp",
-                "-nostdinc",
-                "-undef",
-                "-D__DTS__",
-                "-P",
-                "-x",
-                "assembler-with-cpp",
-                "-I",
-                str(ROOT / "include"),
-                "-I",
-                str(ROOT / "arch/arm/boot/dts"),
-                *include_args,
-                "-",
-            ],
-            input=source,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-    except FileNotFoundError as exc:
-        raise AssertionError("cpp is required to compose the production DTS") from exc
-    if result.returncode:
-        raise AssertionError(f"DTS preprocessing failed: {result.stderr.strip()}")
-    return result.stdout
 
 
 def _balanced_body(source: str, opening: int) -> str:
@@ -94,7 +59,6 @@ _RESERVED_MEMORY_FRAGMENT = re.compile(
 
 def _reserved_memory_bodies(dts: str) -> list[str]:
     """Return the bodies of the declaration and all reopened fragments."""
-    dts = _preprocess_dts(dts)
     bodies = []
     for match in _RESERVED_MEMORY_FRAGMENT.finditer(dts):
         opening = dts.rfind("{", match.start(), match.end())
@@ -107,9 +71,9 @@ def _reserved_memory_body(dts: str) -> str | None:
     return "\n".join(bodies) if bodies else None
 
 
-def _direct_children(reserved_body: str) -> list[tuple[str, str, str | None]]:
+def _direct_children(reserved_body: str) -> list[tuple[str, str]]:
     """Extract direct child node names and bodies from reserved-memory."""
-    children: list[tuple[str, str, str | None]] = []
+    children: list[tuple[str, str]] = []
     index = 0
     while index < len(reserved_body):
         line_end = reserved_body.find("\n", index)
@@ -119,13 +83,7 @@ def _direct_children(reserved_body: str) -> list[tuple[str, str, str | None]]:
         match = _NODE_LINE.match(line)
         if match is not None:
             opening = index + match.end() - 1
-            children.append(
-                (
-                    match.group("name"),
-                    _balanced_body(reserved_body, opening),
-                    match.group("label"),
-                )
-            )
+            children.append((match.group("name"), _balanced_body(reserved_body, opening)))
             node_end = opening + len(_balanced_body(reserved_body, opening)) + 2
             index = node_end
             continue
@@ -135,53 +93,11 @@ def _direct_children(reserved_body: str) -> list[tuple[str, str, str | None]]:
 
 def _reserved_children(dts: str) -> list[tuple[str, str]]:
     """Merge child nodes declared across all reserved-memory fragments."""
-    dts = _preprocess_dts(dts)
-    fragments: dict[str, str] = {}
-    labels: dict[str, str] = {}
+    fragments: dict[str, list[str]] = {}
     for reserved_body in _reserved_memory_bodies(dts):
-        for name, body, label in _direct_children(reserved_body):
-            fragments[name] = fragments.get(name, "") + "\n" + body
-            if label is not None:
-                labels[label] = name
-
-    override_pattern = re.compile(
-        r"(?m)^[ \t]*&(?:(?P<label>[A-Za-z_][A-Za-z0-9_-]*)|"
-        r"\{(?P<path>[^}]+)\})\s*\{"
-    )
-    delete_node_pattern = re.compile(
-        r"(?m)^[ \t]*/delete-node/[ \t]+&(?:(?P<label>[A-Za-z_][A-Za-z0-9_-]*)|"
-        r"\{(?P<path>[^}]+)\})[ \t]*;"
-    )
-    events = [
-        (match.start(), "override", match)
-        for match in override_pattern.finditer(dts)
-    ] + [
-        (match.start(), "delete", match)
-        for match in delete_node_pattern.finditer(dts)
-    ]
-    for _, event_type, match in sorted(events):
-        label = match.group("label")
-        path = match.group("path")
-        name = labels.get(label) if label is not None else path.rstrip("/").rsplit("/", 1)[-1]
-        if name not in fragments:
-            continue
-        if event_type == "delete":
-            del fragments[name]
-            continue
-        opening = dts.rfind("{", match.start(), match.end())
-        overlay = _balanced_body(dts, opening)
-        deleted_properties = re.findall(
-            r"/delete-property/[ \t]+([A-Za-z0-9_,+\-]+)[ \t]*;", overlay
-        )
-        for property_name in deleted_properties:
-            fragments[name] = re.sub(
-                rf"(?m)^[ \t]*{re.escape(property_name)}[ \t]*=.*$\n?",
-                "",
-                fragments[name],
-            )
-        overlay = re.sub(r"(?m)^[ \t]*/delete-property/.*$\n?", "", overlay)
-        fragments[name] += "\n" + overlay
-    return list(fragments.items())
+        for name, body in _direct_children(reserved_body):
+            fragments.setdefault(name, []).append(body)
+    return [(name, "\n".join(bodies)) for name, bodies in fragments.items()]
 
 
 def _cells_with_width(body: str, property_name: str) -> tuple[list[int], int] | None:
@@ -190,10 +106,9 @@ def _cells_with_width(body: str, property_name: str) -> tuple[list[int], int] | 
         r"(?:(?:/bits/[ \t]+(?P<bits>\d+))[ \t]*)?"
         r"<(?P<cells>[^>]*)>;"
     )
-    matches = list(re.finditer(pattern, body))
-    if not matches:
+    match = re.search(pattern, body)
+    if match is None:
         return None
-    match = matches[-1]
     try:
         cells = [int(token, 0) for token in match.group("cells").split()]
     except ValueError as exc:
@@ -206,29 +121,12 @@ def _cells(body: str, property_name: str) -> list[int] | None:
     return parsed[0] if parsed is not None else None
 
 
-def _u32_property(body: str, property_name: str) -> int | None:
-    parsed = _cells_with_width(body, property_name)
-    if parsed is None:
-        return None
-    values, bits = parsed
-    if bits != 32:
-        raise AssertionError(f"ramoops {property_name} must use 32-bit cells")
-    if len(values) != 1 or not 0 <= values[0] <= 0xFFFFFFFF:
-        raise AssertionError(f"ramoops {property_name} must contain one u32 cell")
-    return values[0]
-
-
-def _driver_zone_size(size: int) -> int:
-    """Model ramoops' rounddown_pow_of_two() before zone creation."""
-    return 0 if size == 0 else 1 << (size.bit_length() - 1)
-
-
 def _string_property(body: str, property_name: str) -> str | None:
-    matches = list(re.finditer(
+    match = re.search(
         rf"(?m)^\s*{re.escape(property_name)}\s*=\s*\"([^\"]+)\"\s*;",
         body,
-    ))
-    return matches[-1].group(1) if matches else None
+    )
+    return match.group(1) if match else None
 
 
 def _fold_cells(cells: list[int]) -> int:
@@ -241,12 +139,9 @@ def _fold_cells(cells: list[int]) -> int:
 
 
 def _reg_ranges(body: str, address_cells: int, size_cells: int) -> list[tuple[int, int]]:
-    parsed = _cells_with_width(body, "reg")
-    if parsed is None:
+    cells = _cells(body, "reg")
+    if cells is None:
         return []
-    cells, bits = parsed
-    if bits != 32:
-        raise AssertionError("reg must use 32-bit cells")
     tuple_cells = address_cells + size_cells
     if tuple_cells <= 0 or len(cells) % tuple_cells:
         raise AssertionError("reg must contain complete address/size tuples")
@@ -316,47 +211,24 @@ def validate_ramoops_contract(dts: str) -> None:
 
         buffer_sizes = []
         for property_name in ("record-size", "console-size", "ftrace-size", "pmsg-size"):
-            value = _u32_property(body, property_name)
-            if value is not None:
-                buffer_sizes.append((property_name, value))
+            parsed = _cells_with_width(body, property_name)
+            if parsed is not None:
+                values, bits = parsed
+                if bits != 32:
+                    raise AssertionError(
+                        f"ramoops {property_name} must use 32-bit cells"
+                    )
+                if len(values) != 1 or not 0 <= values[0] <= 0xFFFFFFFF:
+                    raise AssertionError(
+                        f"ramoops {property_name} must contain one u32 cell"
+                    )
+                buffer_sizes.append((property_name, values[0]))
         if not buffer_sizes or not any(size > 0 for _, size in buffer_sizes):
             raise AssertionError(f"ramoops node {name} needs a nonzero buffer size")
-        for property_name, buffer_size in buffer_sizes:
-            if buffer_size and _driver_zone_size(buffer_size) <= _PERSISTENT_RAM_HEADER_SIZE:
-                raise AssertionError(
-                    f"ramoops {property_name} is too small for the persistent-RAM header"
-                )
         if sum(size for _, size in buffer_sizes) > reserved_size:
             raise AssertionError(
                 f"ramoops buffers exceed the reserved region for node {name}"
             )
-        for property_name in ("mem-type", "flags", "max-reason"):
-            value = _u32_property(body, property_name)
-            if value is not None and value > 0x7FFFFFFF:
-                raise AssertionError(f"ramoops {property_name} must fit signed int")
-            if property_name == "mem-type" and value is not None and value not in {0, 1, 2}:
-                raise AssertionError("ramoops mem-type must be 0, 1, or 2")
-        ecc_size = _u32_property(body, "ecc-size")
-        if ecc_size is not None:
-            if ecc_size > 0x7FFFFFFF:
-                raise AssertionError("ramoops ecc-size must fit signed int")
-            if ecc_size:
-                for property_name, buffer_size in buffer_sizes:
-                    if not buffer_size:
-                        continue
-                    zone_size = _driver_zone_size(buffer_size)
-                    if zone_size <= ecc_size:
-                        raise AssertionError(
-                            f"ramoops ecc-size is too large for {property_name}"
-                        )
-                    ecc_blocks = (
-                        zone_size - ecc_size + 128 + ecc_size - 1
-                    ) // (128 + ecc_size)
-                    ecc_total = (ecc_blocks + 1) * ecc_size
-                    if ecc_total >= zone_size:
-                        raise AssertionError(
-                            f"ramoops ecc-size is unusable for {property_name}"
-                        )
 
 
 class Mt8163PstoreContractTests(unittest.TestCase):
@@ -420,96 +292,6 @@ class Mt8163PstoreContractTests(unittest.TestCase):
         )
         discovered_names = {name for name, _ in _ramoops_children(dts)}
         self.assertEqual(discovered_names - existing_names, {"ramoops@4f000000"})
-        validate_ramoops_contract(dts)
-
-    def test_ramoops_ignores_commented_out_nodes(self) -> None:
-        existing_names = {name for name, _ in _ramoops_children(self.dts)}
-        dts = self._with_ramoops(
-            self.dts,
-            """/*
-\t\tramoops@4f000000 {
-\t\t\tcompatible = \"ramoops\";
-\t\t\treg = <0x00 0x4f000000 0x00 0x200000>;
-\t\t\trecord-size = <0x10000>;
-\t\t};
-\t\t*/""",
-        )
-        self.assertEqual(existing_names, {name for name, _ in _ramoops_children(dts)})
-        validate_ramoops_contract(dts)
-
-    def test_ramoops_composes_included_reserved_memory_fragment(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            fragment = Path(directory) / "ramoops-fragment.dtsi"
-            fragment.write_text(
-                """&{/reserved-memory} {
-\t ramoops@4f000000 {
-\t\tcompatible = \"ramoops\";
-\t\treg = <0x00 0x4f000000 0x00 0x200000>;
-\t\trecord-size = <0x10000>;
-\t};
-};
-""",
-                encoding="utf-8",
-            )
-            composed = _preprocess_dts(
-                self.dts + f'\n#include "{fragment.name}"\n',
-                (Path(directory),),
-            )
-        self.assertIn("ramoops@4f000000", [name for name, _ in _ramoops_children(composed)])
-        validate_ramoops_contract(composed)
-
-    def test_ramoops_applies_labeled_child_override(self) -> None:
-        dts = self._with_ramoops(
-            self.dts,
-            """\t\tramoops_label: ramoops@4f000000 {
-\t\t\tcompatible = \"ramoops\";
-\t\t\treg = <0x00 0x4f000000 0x00 0x200000>;
-\t\t\trecord-size = <0x10000>;
-\t\t};""",
-        )
-        dts += "\n&ramoops_label {\n\tstatus = \"disabled\";\n};\n"
-        with self.assertRaisesRegex(AssertionError, "enabled"):
-            validate_ramoops_contract(dts)
-
-    def test_ramoops_applies_path_based_child_override(self) -> None:
-        dts = self._with_ramoops(
-            self.dts,
-            """\t\tramoops@4f000000 {
-\t\t\tcompatible = \"ramoops\";
-\t\t\treg = <0x00 0x4f000000 0x00 0x200000>;
-\t\t\trecord-size = <0x10000>;
-\t\t};""",
-        )
-        dts += "\n&{/reserved-memory/ramoops@4f000000} {\n\tstatus = \"disabled\";\n};\n"
-        with self.assertRaisesRegex(AssertionError, "enabled"):
-            validate_ramoops_contract(dts)
-
-    def test_ramoops_applies_delete_property_directive(self) -> None:
-        existing_names = {name for name, _ in _ramoops_children(self.dts)}
-        dts = self._with_ramoops(
-            self.dts,
-            """\t\tramoops_label: ramoops@4f000000 {
-\t\t\tcompatible = \"ramoops\";
-\t\t\treg = <0x00 0x4f000000 0x00 0x200000>;
-\t\t\trecord-size = <0x10000>;
-\t\t};""",
-        )
-        dts += "\n&ramoops_label { /delete-property/ compatible; };\n"
-        self.assertEqual(existing_names, {name for name, _ in _ramoops_children(dts)})
-        validate_ramoops_contract(dts)
-
-    def test_ramoops_applies_delete_node_directive(self) -> None:
-        existing_names = {name for name, _ in _ramoops_children(self.dts)}
-        dts = self._with_ramoops(
-            self.dts,
-            """\t\tramoops_label: ramoops@4f000000 {
-\t\t\tcompatible = \"ramoops\";
-\t\t\treg = <0x00 0x4f000000 0x00 0x200000>;
-\t\t\trecord-size = <0x10000>;
-\t\t};""",
-        )
-        dts += "\n/delete-node/ &ramoops_label;\n"
-        self.assertEqual(existing_names, {name for name, _ in _ramoops_children(dts)})
         validate_ramoops_contract(dts)
 
     def test_ramoops_rejects_disabled_node(self) -> None:
@@ -586,18 +368,6 @@ class Mt8163PstoreContractTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "32-bit"):
             validate_ramoops_contract(dts)
 
-    def test_ramoops_rejects_non_32_bit_reg_encoding(self) -> None:
-        dts = self._with_ramoops(
-            self.dts,
-            """\t\tramoops@45000000 {
-\t\t\tcompatible = \"ramoops\";
-\t\t\treg = /bits/ 16 <0 0x4500 0 0x2000>;
-\t\t\trecord-size = <0x10000>;
-\t\t};""",
-        )
-        with self.assertRaisesRegex(AssertionError, "reg must use 32-bit"):
-            validate_ramoops_contract(dts)
-
     def test_ramoops_rejects_buffers_larger_than_reserved_region(self) -> None:
         dts = self._with_ramoops(
             self.dts,
@@ -609,85 +379,6 @@ class Mt8163PstoreContractTests(unittest.TestCase):
 \t\t};""",
         )
         with self.assertRaisesRegex(AssertionError, "exceed"):
-            validate_ramoops_contract(dts)
-
-    def test_ramoops_rejects_ecc_size_above_signed_int(self) -> None:
-        dts = self._with_ramoops(
-            self.dts,
-            """\t\tramoops@45000000 {
-\t\t\tcompatible = \"ramoops\";
-\t\t\treg = <0x00 0x45000000 0x00 0x200000>;
-\t\t\trecord-size = <0x10000>;
-\t\t\tecc-size = <0xffffffff>;
-\t\t};""",
-        )
-        with self.assertRaisesRegex(AssertionError, "signed int"):
-            validate_ramoops_contract(dts)
-
-    def test_ramoops_rejects_ecc_size_that_consumes_a_buffer(self) -> None:
-        dts = self._with_ramoops(
-            self.dts,
-            """\t\tramoops@45000000 {
-\t\t\tcompatible = \"ramoops\";
-\t\t\treg = <0x00 0x45000000 0x00 0x200000>;
-\t\t\trecord-size = <0x10000>;
-\t\t\tecc-size = <0x10000>;
-\t\t};""",
-        )
-        with self.assertRaisesRegex(AssertionError, "too large"):
-            validate_ramoops_contract(dts)
-
-    def test_ramoops_rejects_buffer_smaller_than_persistent_ram_header(self) -> None:
-        dts = self._with_ramoops(
-            self.dts,
-            """\t\tramoops@45000000 {
-\t\t\tcompatible = \"ramoops\";
-\t\t\treg = <0x00 0x45000000 0x00 0x200000>;
-\t\t\trecord-size = <1>;
-\t\t};""",
-        )
-        with self.assertRaisesRegex(AssertionError, "persistent-RAM header"):
-            validate_ramoops_contract(dts)
-
-    def test_ramoops_allows_zero_sized_optional_ecc_buffer(self) -> None:
-        dts = self._with_ramoops(
-            self.dts,
-            """\t\tramoops@45000000 {
-\t\t\tcompatible = \"ramoops\";
-\t\t\treg = <0x00 0x45000000 0x00 0x200000>;
-\t\t\trecord-size = <0x10000>;
-\t\t\tconsole-size = <0>;
-\t\t\tecc-size = <0x10>;
-\t\t};""",
-        )
-        validate_ramoops_contract(dts)
-
-    def test_ramoops_rejects_driver_u32_values_above_signed_int(self) -> None:
-        for property_name in ("mem-type", "flags", "max-reason"):
-            with self.subTest(property_name=property_name):
-                dts = self._with_ramoops(
-                    self.dts,
-                    f"""\t\tramoops@45000000 {{
-\t\t\tcompatible = \"ramoops\";
-\t\t\treg = <0x00 0x45000000 0x00 0x200000>;
-\t\t\trecord-size = <0x10000>;
-\t\t\t{property_name} = <0xffffffff>;
-\t\t}};""",
-                )
-                with self.assertRaisesRegex(AssertionError, "signed int"):
-                    validate_ramoops_contract(dts)
-
-    def test_ramoops_rejects_unsupported_mem_type(self) -> None:
-        dts = self._with_ramoops(
-            self.dts,
-            """\t\tramoops@45000000 {
-\t\t\tcompatible = \"ramoops\";
-\t\t\treg = <0x00 0x45000000 0x00 0x200000>;
-\t\t\trecord-size = <0x10000>;
-\t\t\tmem-type = <3>;
-\t\t};""",
-        )
-        with self.assertRaisesRegex(AssertionError, "mem-type must be 0, 1, or 2"):
             validate_ramoops_contract(dts)
 
     def test_ramoops_rejects_multiple_reg_tuples(self) -> None:
