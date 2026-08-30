@@ -86,8 +86,14 @@ static int amazon_thermistor_resistance_to_temp(int resistance, int *temp_mc)
 	return -ERANGE;
 }
 
-static int amazon_thermistor_read_temp(struct amazon_thermistor *sensor,
-				       int *temp)
+/*
+ * The true temperature at the thermistor, in millicelsius, straight off the
+ * NCP15XH103 curve. This is what the thermal framework is entitled to: a zone's
+ * temp is defined to be a temperature, and every generic consumer -- a trip
+ * point, a governor, the UI, someone with cat -- reads it as one.
+ */
+static int amazon_thermistor_read_temp_raw(struct amazon_thermistor *sensor,
+					   int *temp)
 {
 	int critical_mv;
 	int resistance;
@@ -120,7 +126,35 @@ static int amazon_thermistor_read_temp(struct amazon_thermistor *sensor,
 	if (ret < 0)
 		return ret;
 
-	/* Preserve the vendor virtual-sensor offset/EMA/weight transform. */
+	*temp = raw_temp;
+	return 0;
+}
+
+/*
+ * The vendor virtual-sensor transform: weight/1000 * EMA(raw - offset).
+ *
+ * This does not produce a temperature and is not meant to. It produces one
+ * sensor's weighted *contribution* to a virtual sensor, which the vendor design
+ * sums across the board thermistors and the SoC sensor to estimate the
+ * temperature of the enclosure. With this board's parameters -- offset 9 or
+ * 10 C, weight 200 -- a thermistor sitting at 70 C contributes 12.2, and three
+ * of them contribute 0.2 each, so the weights only reach unity once the
+ * aggregate that consumes them exists.
+ *
+ * No such aggregate exists in this tree, and until one does the transform has
+ * no consumer other than the sysfs attributes below, which keep it for the
+ * vendor tooling that expects this exact number.
+ */
+static int amazon_thermistor_read_temp(struct amazon_thermistor *sensor,
+				       int *temp)
+{
+	int raw_temp;
+	int ret;
+
+	ret = amazon_thermistor_read_temp_raw(sensor, &raw_temp);
+	if (ret < 0)
+		return ret;
+
 	mutex_lock(&sensor->params_lock);
 	raw_temp -= sensor->offset;
 	if (!sensor->filter_valid) {
@@ -144,7 +178,7 @@ static int amazon_thermistor_get_temp(struct thermal_zone_device *tzd,
 {
 	struct amazon_thermistor *sensor = tzd->devdata;
 
-	return amazon_thermistor_read_temp(sensor, temp);
+	return amazon_thermistor_read_temp_raw(sensor, temp);
 }
 
 static struct thermal_zone_device_ops amazon_thermistor_tz_ops = {
