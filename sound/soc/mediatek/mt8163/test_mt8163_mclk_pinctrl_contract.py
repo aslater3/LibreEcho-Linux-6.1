@@ -80,6 +80,14 @@ def parse_phandles(value):
     }
 
 
+def pinmux_values(body):
+    """Return all pinmux cells configured by a pinctrl node body."""
+    values = []
+    for value in re.findall(r"pinmux\s*=\s*<([^>]+)>\s*;", body):
+        values.extend(parse_phandles(value))
+    return values
+
+
 def phandle_node_bodies(text):
     """Return node bodies indexed by their explicit phandle value."""
     nodes = {}
@@ -169,6 +177,22 @@ def check_contract(dts_text, afe_text):
             failures.append(
                 f"{name} does not preserve cmmclk-mclk phandle(s): {formatted}"
             )
+
+        for phandle in states[name]:
+            body = phandle_nodes.get(phandle)
+            if body is None:
+                failures.append(f"{name} references undefined phandle 0x{phandle:x}")
+                continue
+            muxes = pinmux_values(body)
+            if phandle in mclk_refs:
+                continue
+            conflicting = sorted(value for value in muxes if value in (0x7700, 0x7701))
+            if conflicting:
+                formatted = ", ".join(f"0x{value:x}" for value in conflicting)
+                failures.append(
+                    f"{name} member phandle 0x{phandle:x} remuxes CMMCLK "
+                    f"pin 119 ({formatted})"
+                )
 
     return failures
 

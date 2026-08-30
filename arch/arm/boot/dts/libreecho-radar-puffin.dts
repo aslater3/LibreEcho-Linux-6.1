@@ -762,8 +762,7 @@
 				};
 
 				pins_i2s_dat {
-					pinmux = <0x2e00 0x2f00 0x3000 0x7700>;
-				};
+					pinmux = <0x2e00 0x2f00 0x3000>;				};
 			};
 
 			pmicclkspeaker_mode1 {
@@ -783,7 +782,7 @@
 				};
 
 				pins_i2s_dat {
-					pinmux = <0x2e02 0x2f02 0x3002 0x7701>;
+					pinmux = <0x2e02 0x2f02 0x3002>;
 				};
 			};
 
