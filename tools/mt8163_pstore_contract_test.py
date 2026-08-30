@@ -485,6 +485,7 @@ class Mt8163PstoreContractTests(unittest.TestCase):
             validate_ramoops_contract(dts)
 
     def test_ramoops_applies_delete_property_directive(self) -> None:
+        existing_names = {name for name, _ in _ramoops_children(self.dts)}
         dts = self._with_ramoops(
             self.dts,
             """\t\tramoops_label: ramoops@4f000000 {
@@ -494,10 +495,11 @@ class Mt8163PstoreContractTests(unittest.TestCase):
 \t\t};""",
         )
         dts += "\n&ramoops_label { /delete-property/ compatible; };\n"
-        self.assertEqual([], _ramoops_children(dts))
+        self.assertEqual(existing_names, {name for name, _ in _ramoops_children(dts)})
         validate_ramoops_contract(dts)
 
     def test_ramoops_applies_delete_node_directive(self) -> None:
+        existing_names = {name for name, _ in _ramoops_children(self.dts)}
         dts = self._with_ramoops(
             self.dts,
             """\t\tramoops_label: ramoops@4f000000 {
@@ -507,7 +509,7 @@ class Mt8163PstoreContractTests(unittest.TestCase):
 \t\t};""",
         )
         dts += "\n/delete-node/ &ramoops_label;\n"
-        self.assertEqual([], _ramoops_children(dts))
+        self.assertEqual(existing_names, {name for name, _ in _ramoops_children(dts)})
         validate_ramoops_contract(dts)
 
     def test_ramoops_rejects_disabled_node(self) -> None:
