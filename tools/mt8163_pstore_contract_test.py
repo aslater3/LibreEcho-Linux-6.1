@@ -52,11 +52,23 @@ def _balanced_body(source: str, opening: int) -> str:
     raise AssertionError("unclosed DT node")
 
 
+_RESERVED_MEMORY_FRAGMENT = re.compile(
+    r"(?m)^[ \t]*(?:reserved-memory|&\{/?reserved-memory\}|&reserved-memory)\s*\{"
+)
+
+
+def _reserved_memory_bodies(dts: str) -> list[str]:
+    """Return the bodies of the declaration and all reopened fragments."""
+    bodies = []
+    for match in _RESERVED_MEMORY_FRAGMENT.finditer(dts):
+        opening = dts.rfind("{", match.start(), match.end())
+        bodies.append(_balanced_body(dts, opening))
+    return bodies
+
+
 def _reserved_memory_body(dts: str) -> str | None:
-    match = re.search(r"(?m)^\s*reserved-memory\s*\{", dts)
-    if match is None:
-        return None
-    return _balanced_body(dts, dts.find("{", match.start()))
+    bodies = _reserved_memory_bodies(dts)
+    return "\n".join(bodies) if bodies else None
 
 
 def _direct_children(reserved_body: str) -> list[tuple[str, str]]:
@@ -79,18 +91,34 @@ def _direct_children(reserved_body: str) -> list[tuple[str, str]]:
     return children
 
 
-def _cells(body: str, property_name: str) -> list[int] | None:
+def _reserved_children(dts: str) -> list[tuple[str, str]]:
+    """Merge child nodes declared across all reserved-memory fragments."""
+    fragments: dict[str, list[str]] = {}
+    for reserved_body in _reserved_memory_bodies(dts):
+        for name, body in _direct_children(reserved_body):
+            fragments.setdefault(name, []).append(body)
+    return [(name, "\n".join(bodies)) for name, bodies in fragments.items()]
+
+
+def _cells_with_width(body: str, property_name: str) -> tuple[list[int], int] | None:
     pattern = (
-        rf"(?m)^\s*{re.escape(property_name)}\s*=\s*"
-        r"(?:(?:/bits/\s+\d+)\s*)?<([^>]*)>;"
+        rf"(?m)^[ \t]*{re.escape(property_name)}[ \t]*=[ \t]*"
+        r"(?:(?:/bits/[ \t]+(?P<bits>\d+))[ \t]*)?"
+        r"<(?P<cells>[^>]*)>;"
     )
     match = re.search(pattern, body)
     if match is None:
         return None
     try:
-        return [int(token, 0) for token in match.group(1).split()]
+        cells = [int(token, 0) for token in match.group("cells").split()]
     except ValueError as exc:
         raise AssertionError(f"{property_name} contains a non-integer cell") from exc
+    return cells, int(match.group("bits") or 32)
+
+
+def _cells(body: str, property_name: str) -> list[int] | None:
+    parsed = _cells_with_width(body, property_name)
+    return parsed[0] if parsed is not None else None
 
 
 def _string_property(body: str, property_name: str) -> str | None:
@@ -126,12 +154,9 @@ def _reg_ranges(body: str, address_cells: int, size_cells: int) -> list[tuple[in
 
 
 def _ramoops_children(dts: str) -> list[tuple[str, str]]:
-    reserved_body = _reserved_memory_body(dts)
-    if reserved_body is None:
-        return []
     return [
         (name, body)
-        for name, body in _direct_children(reserved_body)
+        for name, body in _reserved_children(dts)
         if _string_property(body, "compatible") == "ramoops"
     ]
 
@@ -154,14 +179,7 @@ def validate_ramoops_contract(dts: str) -> None:
     if address_count <= 0 or size_count <= 0:
         raise AssertionError("reserved-memory cell counts must be positive")
 
-    children = _direct_children(reserved_body)
-    existing_ranges: list[tuple[str, int, int]] = []
-    for name, body in children:
-        if name == ramoops_nodes[0][0]:
-            continue
-        for address, size in _reg_ranges(body, address_count, size_count):
-            if size:
-                existing_ranges.append((name, address, size))
+    children = _reserved_children(dts)
 
     for name, body in ramoops_nodes:
         status = _string_property(body, "status")
@@ -171,25 +189,36 @@ def validate_ramoops_contract(dts: str) -> None:
         ramoops_ranges = _reg_ranges(body, address_count, size_count)
         if not ramoops_ranges:
             raise AssertionError(f"ramoops node {name} needs an explicit nonempty reg")
-        reserved_size = 0
-        for address, size in ramoops_ranges:
-            if size == 0:
-                raise AssertionError(f"ramoops node {name} needs a nonzero reg size")
-            reserved_size += size
-            end = address + size
-            for other_name, other_address, other_size in existing_ranges:
-                other_end = other_address + other_size
-                if address < other_end and other_address < end:
-                    raise AssertionError(
-                        f"ramoops range {address:#x}-{end:#x} overlaps "
-                        f"reserved-memory child {other_name}"
-                    )
+        if len(ramoops_ranges) != 1:
+            raise AssertionError(f"ramoops node {name} needs exactly one reg tuple")
+        address, reserved_size = ramoops_ranges[0]
+        if reserved_size == 0:
+            raise AssertionError(f"ramoops node {name} needs a nonzero reg size")
+        end = address + reserved_size
+        for other_name, other_body in children:
+            if other_name == name:
+                continue
+            for other_address, other_size in _reg_ranges(
+                other_body, address_count, size_count
+            ):
+                if other_size:
+                    other_end = other_address + other_size
+                    if address < other_end and other_address < end:
+                        raise AssertionError(
+                            f"ramoops range {address:#x}-{end:#x} overlaps "
+                            f"reserved-memory child {other_name}"
+                        )
 
         buffer_sizes = []
         for property_name in ("record-size", "console-size", "ftrace-size", "pmsg-size"):
-            values = _cells(body, property_name)
-            if values is not None:
-                if len(values) != 1:
+            parsed = _cells_with_width(body, property_name)
+            if parsed is not None:
+                values, bits = parsed
+                if bits != 32:
+                    raise AssertionError(
+                        f"ramoops {property_name} must use 32-bit cells"
+                    )
+                if len(values) != 1 or not 0 <= values[0] <= 0xFFFFFFFF:
                     raise AssertionError(
                         f"ramoops {property_name} must contain one u32 cell"
                     )
@@ -214,6 +243,10 @@ class Mt8163PstoreContractTests(unittest.TestCase):
         if marker not in dts:
             raise AssertionError("test fixture lost the reserved-memory insertion point")
         return dts.replace(marker, node + "\n\n" + marker, 1)
+
+    @staticmethod
+    def _with_ramoops_fragment(dts: str, node: str) -> str:
+        return dts + "\n&{/reserved-memory} {\n" + node + "\n};\n"
 
     def test_pstore_config_layers_are_consistent(self) -> None:
         enabled = {
@@ -246,6 +279,18 @@ class Mt8163PstoreContractTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(AssertionError, "overlaps"):
             validate_ramoops_contract(dts)
+
+    def test_ramoops_reads_reopened_reserved_memory_fragment(self) -> None:
+        dts = self._with_ramoops_fragment(
+            self.dts,
+            """\t ramoops@45000000 {
+\t\t\tcompatible = \"ramoops\";
+\t\t\treg = <0x00 0x45000000 0x00 0x200000>;
+\t\t\trecord-size = <0x10000>;
+\t\t};""",
+        )
+        self.assertEqual(["ramoops@45000000"], [name for name, _ in _ramoops_children(dts)])
+        validate_ramoops_contract(dts)
 
     def test_ramoops_rejects_disabled_node(self) -> None:
         dts = self._with_ramoops(
@@ -309,6 +354,18 @@ class Mt8163PstoreContractTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "one u32"):
             validate_ramoops_contract(dts)
 
+    def test_ramoops_rejects_non_32_bit_buffer_encoding(self) -> None:
+        dts = self._with_ramoops(
+            self.dts,
+            """\t\tramoops@45000000 {
+\t\t\tcompatible = \"ramoops\";
+\t\t\treg = <0x00 0x45000000 0x00 0x200000>;
+\t\t\trecord-size = /bits/ 64 <0x10000>;
+\t\t};""",
+        )
+        with self.assertRaisesRegex(AssertionError, "32-bit"):
+            validate_ramoops_contract(dts)
+
     def test_ramoops_rejects_buffers_larger_than_reserved_region(self) -> None:
         dts = self._with_ramoops(
             self.dts,
@@ -320,6 +377,19 @@ class Mt8163PstoreContractTests(unittest.TestCase):
 \t\t};""",
         )
         with self.assertRaisesRegex(AssertionError, "exceed"):
+            validate_ramoops_contract(dts)
+
+    def test_ramoops_rejects_multiple_reg_tuples(self) -> None:
+        dts = self._with_ramoops(
+            self.dts,
+            """\t\tramoops@45000000 {
+\t\t\tcompatible = \"ramoops\";
+\t\t\treg = <0x00 0x45000000 0x00 0x10000
+\t\t\t       0x00 0x46000000 0x00 0x200000>;
+\t\t\trecord-size = <0x10000>;
+\t\t};""",
+        )
+        with self.assertRaisesRegex(AssertionError, "exactly one reg tuple"):
             validate_ramoops_contract(dts)
 
     def test_kernel_tree_does_not_claim_product_initramfs_archival(self) -> None:
