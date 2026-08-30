@@ -12,6 +12,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/io.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
 #include <linux/regulator/consumer.h>
@@ -94,6 +95,12 @@ struct mtk_glue {
 	bool devctl_seen;
 	struct pinctrl_state *vbus_off;
 	struct delayed_work diag_work;
+	struct mutex role_lock;
+	spinlock_t mode_lock;
+	struct work_struct mode_work;
+	enum usb_role pending_role;
+	bool mode_pending;
+	bool mode_work_running;
 };
 
 #define MT8163_USB_PHY_BANK_OFFSET	0x800
@@ -463,14 +470,34 @@ static void mt8163_musb_rescan_port(struct mtk_glue *glue)
 	usb_hcd_poll_rh_status(musb->hcd);
 }
 
+static void mtk_musb_restore_gadget_pullup(struct musb *musb)
+{
+	u8 power;
+
+	/* Preserve the gadget driver's requested connection across host mode. */
+	if (!musb->softconnect)
+		return;
+
+	power = readb(musb->mregs + MUSB_POWER);
+	if (!(power & MUSB_POWER_SOFTCONN)) {
+		power |= MUSB_POWER_SOFTCONN;
+		musb_writeb(musb->mregs, MUSB_POWER, power);
+	}
+}
+
 static int mtk_otg_switch_set(struct mtk_glue *glue, enum usb_role role)
 {
 	struct musb *musb = glue->musb;
-	u8 devctl = readb(musb->mregs + MUSB_DEVCTL);
+	u8 devctl;
 	enum usb_role new_role;
+	int ret;
 
-	if (role == glue->role)
-		return 0;
+	mutex_lock(&glue->role_lock);
+	devctl = readb(musb->mregs + MUSB_DEVCTL);
+	if (role == glue->role) {
+		ret = 0;
+		goto out;
+	}
 
 	switch (role) {
 	case USB_ROLE_HOST:
@@ -599,6 +626,7 @@ static int mtk_otg_switch_set(struct mtk_glue *glue, enum usb_role role)
 			phy_power_on(glue->phy);
 
 		MUSB_DEV_MODE(musb);
+		mtk_musb_restore_gadget_pullup(musb);
 		break;
 	case USB_ROLE_NONE:
 		glue->phy_mode = PHY_MODE_USB_OTG;
@@ -611,7 +639,8 @@ static int mtk_otg_switch_set(struct mtk_glue *glue, enum usb_role role)
 		break;
 	default:
 		dev_err(glue->dev, "Invalid State\n");
-		return -EINVAL;
+		ret = -EINVAL;
+		goto out;
 	}
 
 	glue->role = new_role;
@@ -633,7 +662,10 @@ static int mtk_otg_switch_set(struct mtk_glue *glue, enum usb_role role)
 	if (glue->phy)
 		phy_set_mode(glue->phy, glue->phy_mode);
 
-	return 0;
+	ret = 0;
+out:
+	mutex_unlock(&glue->role_lock);
+	return ret;
 }
 
 static int musb_usb_role_sx_set(struct usb_role_switch *sw, enum usb_role role)
@@ -755,24 +787,47 @@ static u16 mtk_musb_clearw(void __iomem *addr, unsigned int offset)
 	return data;
 }
 
+static void mtk_musb_mode_work(struct work_struct *work)
+{
+	struct mtk_glue *glue = container_of(work, struct mtk_glue, mode_work);
+	enum usb_role role;
+	unsigned long flags;
+	int ret;
+
+	for (;;) {
+		spin_lock_irqsave(&glue->mode_lock, flags);
+		if (!glue->mode_pending) {
+			glue->mode_work_running = false;
+			spin_unlock_irqrestore(&glue->mode_lock, flags);
+			return;
+		}
+		role = glue->pending_role;
+		glue->mode_pending = false;
+		spin_unlock_irqrestore(&glue->mode_lock, flags);
+
+		ret = mtk_otg_switch_set(glue, role);
+		if (ret)
+			dev_err(glue->dev, "deferred role switch to %d failed: %d\n",
+				role, ret);
+	}
+}
+
 static int mtk_musb_set_mode(struct musb *musb, u8 mode)
 {
 	struct device *dev = musb->controller;
 	struct mtk_glue *glue = dev_get_drvdata(dev->parent);
-	enum phy_mode new_mode;
 	enum usb_role new_role;
+	unsigned long flags;
+	bool queue_work = false;
 
 	switch (mode) {
 	case MUSB_HOST:
-		new_mode = PHY_MODE_USB_HOST;
 		new_role = USB_ROLE_HOST;
 		break;
 	case MUSB_PERIPHERAL:
-		new_mode = PHY_MODE_USB_DEVICE;
 		new_role = USB_ROLE_DEVICE;
 		break;
 	case MUSB_OTG:
-		new_mode = PHY_MODE_USB_OTG;
 		new_role = USB_ROLE_NONE;
 		break;
 	default:
@@ -780,15 +835,23 @@ static int mtk_musb_set_mode(struct musb *musb, u8 mode)
 		return -EINVAL;
 	}
 
-	if (glue->phy_mode == new_mode)
-		return 0;
-
 	if (musb->port_mode != MUSB_OTG) {
 		dev_err(glue->dev, "Does not support changing modes\n");
 		return -EINVAL;
 	}
 
-	mtk_otg_switch_set(glue, new_role);
+	/* mode_store() holds musb->lock with IRQs disabled; do not sleep here. */
+	spin_lock_irqsave(&glue->mode_lock, flags);
+	glue->pending_role = new_role;
+	glue->mode_pending = true;
+	if (!glue->mode_work_running) {
+		glue->mode_work_running = true;
+		queue_work = true;
+	}
+	spin_unlock_irqrestore(&glue->mode_lock, flags);
+
+	if (queue_work)
+		schedule_work(&glue->mode_work);
 	return 0;
 }
 
@@ -889,6 +952,7 @@ static int mtk_musb_exit(struct musb *musb)
 	struct device *dev = musb->controller;
 	struct mtk_glue *glue = dev_get_drvdata(dev->parent);
 
+	cancel_work_sync(&glue->mode_work);
 	if (musb->port_mode == MUSB_OTG)
 		mtk_otg_switch_exit(glue);
 	if (glue->phy) {
@@ -971,6 +1035,9 @@ static int mtk_musb_probe(struct platform_device *pdev)
 	glue->data = device_get_match_data(dev);
 	if (!glue->data)
 		return -EINVAL;
+	mutex_init(&glue->role_lock);
+	spin_lock_init(&glue->mode_lock);
+	INIT_WORK(&glue->mode_work, mtk_musb_mode_work);
 	INIT_DELAYED_WORK(&glue->diag_work, mt8163_musb_diag_work);
 	pdata = devm_kzalloc(dev, sizeof(*pdata), GFP_KERNEL);
 	if (!pdata)
