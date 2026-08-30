@@ -31,6 +31,8 @@ PLAYBACK_STATES = (
     "extamp-dacmux-pullhigh",
     "extamp-dacmux-pulllow",
 )
+CMMCLK_PIN = 0x77
+CMMCLK_FUNCTION = 0x01
 
 FUNCTION_STATE_SYMBOLS = {
     "mt8163_afe_select_i2s": ("MT8163_PIN_I2S_ACTIVE", "MT8163_PIN_I2S_IDLE"),
@@ -164,7 +166,11 @@ def check_contract(dts_text, afe_text):
         body = phandle_nodes.get(phandle)
         if body is None:
             failures.append(f"cmmclk-mclk phandle 0x{phandle:x} is not defined")
-        elif "pinmux = <0x7701>" not in body:
+        elif not any(
+            value >> 8 == CMMCLK_PIN and
+            (value & 0xff) == CMMCLK_FUNCTION
+            for value in pinmux_values(body)
+        ):
             failures.append(
                 f"cmmclk-mclk phandle 0x{phandle:x} does not configure "
                 "CMMCLK pin 119/function 1"
@@ -186,7 +192,9 @@ def check_contract(dts_text, afe_text):
             muxes = pinmux_values(body)
             if phandle in mclk_refs:
                 continue
-            conflicting = sorted(value for value in muxes if value in (0x7700, 0x7701))
+            conflicting = sorted(
+                value for value in muxes if value >> 8 == CMMCLK_PIN
+            )
             if conflicting:
                 formatted = ", ".join(f"0x{value:x}" for value in conflicting)
                 failures.append(
