@@ -2142,14 +2142,14 @@
 			pinctrl-names = "audpmicclk-speaker-mode0\0audpmicclk-speaker-mode1\0audi2s1-speaker-mode0\0audi2s1-speaker-mode1\0extamp-pullhigh\0extamp-pulllow\0cmmclk-mclk\0extamp-dacmux-pullhigh\0extamp-dacmux-pulllow";
 			pinctrl-0 = <0x4c>;
 			pinctrl-1 = <0x4d>;
-			pinctrl-2 = <0x4a>;
-			pinctrl-3 = <0x4b>;
-			pinctrl-4 = <0x2a>;
-			pinctrl-5 = <0x2b>;
+			pinctrl-2 = <0x4a 0x2c>;
+			pinctrl-3 = <0x4b 0x2c>;
+			pinctrl-4 = <0x2a 0x2c>;
+			pinctrl-5 = <0x2b 0x2c>;
 			pinctrl-6 = <0x2c>;
 			status = "okay";
-			pinctrl-7 = <0x31>;
-			pinctrl-8 = <0x32>;
+			pinctrl-7 = <0x31 0x2c>;
+			pinctrl-8 = <0x32 0x2c>;
 		};
 
 		mt_soc_ul1_pcm@11220000 {
