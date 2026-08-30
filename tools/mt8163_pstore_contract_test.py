@@ -271,9 +271,9 @@ class Mt8163PstoreContractTests(unittest.TestCase):
     def test_ramoops_rejects_overlap_with_existing_reserved_child(self) -> None:
         dts = self._with_ramoops(
             self.dts,
-            """\t\tramoops@44400000 {
+            """\t\tramoops@43000000 {
 \t\t\tcompatible = \"ramoops\";
-\t\t\treg = <0x00 0x44400000 0x00 0x200000>;
+\t\t\treg = <0x00 0x43000000 0x00 0x200000>;
 \t\t\trecord-size = <0x10000>;
 \t\t};""",
         )
@@ -281,15 +281,17 @@ class Mt8163PstoreContractTests(unittest.TestCase):
             validate_ramoops_contract(dts)
 
     def test_ramoops_reads_reopened_reserved_memory_fragment(self) -> None:
+        existing_names = {name for name, _ in _ramoops_children(self.dts)}
         dts = self._with_ramoops_fragment(
             self.dts,
-            """\t ramoops@45000000 {
+            """\t ramoops@4f000000 {
 \t\t\tcompatible = \"ramoops\";
-\t\t\treg = <0x00 0x45000000 0x00 0x200000>;
+\t\t\treg = <0x00 0x4f000000 0x00 0x200000>;
 \t\t\trecord-size = <0x10000>;
 \t\t};""",
         )
-        self.assertEqual(["ramoops@45000000"], [name for name, _ in _ramoops_children(dts)])
+        discovered_names = {name for name, _ in _ramoops_children(dts)}
+        self.assertEqual(discovered_names - existing_names, {"ramoops@4f000000"})
         validate_ramoops_contract(dts)
 
     def test_ramoops_rejects_disabled_node(self) -> None:
