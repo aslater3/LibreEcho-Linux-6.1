@@ -143,12 +143,17 @@ def _reserved_children(dts: str) -> list[tuple[str, str]]:
             if label is not None:
                 labels[label] = name
 
-    override_pattern = re.compile(r"(?m)^[ \t]*&(?P<label>[A-Za-z_][A-Za-z0-9_-]*)\s*\{")
+    override_pattern = re.compile(
+        r"(?m)^[ \t]*&(?:(?P<label>[A-Za-z_][A-Za-z0-9_-]*)|"
+        r"\{(?P<path>[^}]+)\})\s*\{"
+    )
     for match in override_pattern.finditer(dts):
-        name = labels.get(match.group("label"))
-        if name is None:
+        label = match.group("label")
+        path = match.group("path")
+        name = labels.get(label) if label is not None else path.rstrip("/").rsplit("/", 1)[-1]
+        if name not in fragments:
             continue
-        opening = dts.find("{", match.start(), match.end())
+        opening = dts.rfind("{", match.start(), match.end())
         fragments[name].append(_balanced_body(dts, opening))
     return [(name, "\n".join(bodies)) for name, bodies in fragments.items()]
 
@@ -290,6 +295,8 @@ def validate_ramoops_contract(dts: str) -> None:
             value = _u32_property(body, property_name)
             if value is not None and value > 0x7FFFFFFF:
                 raise AssertionError(f"ramoops {property_name} must fit signed int")
+            if property_name == "mem-type" and value is not None and value not in {0, 1, 2}:
+                raise AssertionError("ramoops mem-type must be 0, 1, or 2")
         ecc_size = _u32_property(body, "ecc-size")
         if ecc_size is not None:
             if ecc_size > 0x7FFFFFFF:
@@ -421,6 +428,19 @@ class Mt8163PstoreContractTests(unittest.TestCase):
 \t\t};""",
         )
         dts += "\n&ramoops_label {\n\tstatus = \"disabled\";\n};\n"
+        with self.assertRaisesRegex(AssertionError, "enabled"):
+            validate_ramoops_contract(dts)
+
+    def test_ramoops_applies_path_based_child_override(self) -> None:
+        dts = self._with_ramoops(
+            self.dts,
+            """\t\tramoops@4f000000 {
+\t\t\tcompatible = \"ramoops\";
+\t\t\treg = <0x00 0x4f000000 0x00 0x200000>;
+\t\t\trecord-size = <0x10000>;
+\t\t};""",
+        )
+        dts += "\n&{/reserved-memory/ramoops@4f000000} {\n\tstatus = \"disabled\";\n};\n"
         with self.assertRaisesRegex(AssertionError, "enabled"):
             validate_ramoops_contract(dts)
 
@@ -564,6 +584,19 @@ class Mt8163PstoreContractTests(unittest.TestCase):
                 )
                 with self.assertRaisesRegex(AssertionError, "signed int"):
                     validate_ramoops_contract(dts)
+
+    def test_ramoops_rejects_unsupported_mem_type(self) -> None:
+        dts = self._with_ramoops(
+            self.dts,
+            """\t\tramoops@45000000 {
+\t\t\tcompatible = \"ramoops\";
+\t\t\treg = <0x00 0x45000000 0x00 0x200000>;
+\t\t\trecord-size = <0x10000>;
+\t\t\tmem-type = <3>;
+\t\t};""",
+        )
+        with self.assertRaisesRegex(AssertionError, "mem-type must be 0, 1, or 2"):
+            validate_ramoops_contract(dts)
 
     def test_ramoops_rejects_multiple_reg_tuples(self) -> None:
         dts = self._with_ramoops(
