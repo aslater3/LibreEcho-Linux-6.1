@@ -36,6 +36,61 @@ _NODE_LINE = re.compile(
 )
 
 
+def _strip_comments(source: str) -> str:
+    """Remove DTS comments while preserving newlines and string contents."""
+    result: list[str] = []
+    index = 0
+    state = "normal"
+    while index < len(source):
+        char = source[index]
+        next_char = source[index + 1] if index + 1 < len(source) else ""
+        if state == "normal":
+            if char == '"':
+                state = "string"
+                result.append(char)
+                index += 1
+            elif char == "/" and next_char == "/":
+                state = "line_comment"
+                result.extend((" ", " "))
+                index += 2
+            elif char == "/" and next_char == "*":
+                state = "block_comment"
+                result.extend((" ", " "))
+                index += 2
+            else:
+                result.append(char)
+                index += 1
+        elif state == "string":
+            result.append(char)
+            if char == "\\" and next_char:
+                result.append(next_char)
+                index += 2
+            elif char == '"':
+                state = "normal"
+                index += 1
+            else:
+                index += 1
+        elif state == "line_comment":
+            if char == "\n":
+                result.append(char)
+                state = "normal"
+            else:
+                result.append(" ")
+            index += 1
+        else:
+            if char == "\n":
+                result.append(char)
+            else:
+                result.append(" ")
+            if char == "*" and next_char == "/":
+                result.append(" ")
+                index += 2
+                state = "normal"
+            else:
+                index += 1
+    return "".join(result)
+
+
 def _balanced_body(source: str, opening: int) -> str:
     """Return the text inside the brace at *opening*."""
     if source[opening] != "{":
@@ -59,6 +114,7 @@ _RESERVED_MEMORY_FRAGMENT = re.compile(
 
 def _reserved_memory_bodies(dts: str) -> list[str]:
     """Return the bodies of the declaration and all reopened fragments."""
+    dts = _strip_comments(dts)
     bodies = []
     for match in _RESERVED_MEMORY_FRAGMENT.finditer(dts):
         opening = dts.rfind("{", match.start(), match.end())
@@ -292,6 +348,20 @@ class Mt8163PstoreContractTests(unittest.TestCase):
         )
         discovered_names = {name for name, _ in _ramoops_children(dts)}
         self.assertEqual(discovered_names - existing_names, {"ramoops@4f000000"})
+        validate_ramoops_contract(dts)
+
+    def test_ramoops_ignores_commented_out_nodes(self) -> None:
+        dts = self._with_ramoops(
+            self.dts,
+            """/*
+\t\tramoops@4f000000 {
+\t\t\tcompatible = \"ramoops\";
+\t\t\treg = <0x00 0x4f000000 0x00 0x200000>;
+\t\t\trecord-size = <0x10000>;
+\t\t};
+\t\t*/""",
+        )
+        self.assertEqual([], _ramoops_children(dts))
         validate_ramoops_contract(dts)
 
     def test_ramoops_rejects_disabled_node(self) -> None:
