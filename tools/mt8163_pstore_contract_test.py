@@ -31,6 +31,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFCONFIG = ROOT / "arch/arm/configs/mt8163_arm32_defconfig"
 PRODUCTION_DTS = ROOT / "arch/arm/boot/dts/libreecho-radar-puffin.dts"
 README = ROOT / "README.md"
+_PERSISTENT_RAM_HEADER_SIZE = 12
 
 _NODE_LINE = re.compile(
     r"^[ \t]*(?:(?P<label>[A-Za-z_][A-Za-z0-9_-]*):\s*)?"
@@ -135,11 +136,11 @@ def _direct_children(reserved_body: str) -> list[tuple[str, str, str | None]]:
 def _reserved_children(dts: str) -> list[tuple[str, str]]:
     """Merge child nodes declared across all reserved-memory fragments."""
     dts = _preprocess_dts(dts)
-    fragments: dict[str, list[str]] = {}
+    fragments: dict[str, str] = {}
     labels: dict[str, str] = {}
     for reserved_body in _reserved_memory_bodies(dts):
         for name, body, label in _direct_children(reserved_body):
-            fragments.setdefault(name, []).append(body)
+            fragments[name] = fragments.get(name, "") + "\n" + body
             if label is not None:
                 labels[label] = name
 
@@ -147,15 +148,40 @@ def _reserved_children(dts: str) -> list[tuple[str, str]]:
         r"(?m)^[ \t]*&(?:(?P<label>[A-Za-z_][A-Za-z0-9_-]*)|"
         r"\{(?P<path>[^}]+)\})\s*\{"
     )
-    for match in override_pattern.finditer(dts):
+    delete_node_pattern = re.compile(
+        r"(?m)^[ \t]*/delete-node/[ \t]+&(?:(?P<label>[A-Za-z_][A-Za-z0-9_-]*)|"
+        r"\{(?P<path>[^}]+)\})[ \t]*;"
+    )
+    events = [
+        (match.start(), "override", match)
+        for match in override_pattern.finditer(dts)
+    ] + [
+        (match.start(), "delete", match)
+        for match in delete_node_pattern.finditer(dts)
+    ]
+    for _, event_type, match in sorted(events):
         label = match.group("label")
         path = match.group("path")
         name = labels.get(label) if label is not None else path.rstrip("/").rsplit("/", 1)[-1]
         if name not in fragments:
             continue
+        if event_type == "delete":
+            del fragments[name]
+            continue
         opening = dts.rfind("{", match.start(), match.end())
-        fragments[name].append(_balanced_body(dts, opening))
-    return [(name, "\n".join(bodies)) for name, bodies in fragments.items()]
+        overlay = _balanced_body(dts, opening)
+        deleted_properties = re.findall(
+            r"/delete-property/[ \t]+([A-Za-z0-9_,+\-]+)[ \t]*;", overlay
+        )
+        for property_name in deleted_properties:
+            fragments[name] = re.sub(
+                rf"(?m)^[ \t]*{re.escape(property_name)}[ \t]*=.*$\n?",
+                "",
+                fragments[name],
+            )
+        overlay = re.sub(r"(?m)^[ \t]*/delete-property/.*$\n?", "", overlay)
+        fragments[name] += "\n" + overlay
+    return list(fragments.items())
 
 
 def _cells_with_width(body: str, property_name: str) -> tuple[list[int], int] | None:
@@ -192,6 +218,11 @@ def _u32_property(body: str, property_name: str) -> int | None:
     return values[0]
 
 
+def _driver_zone_size(size: int) -> int:
+    """Model ramoops' rounddown_pow_of_two() before zone creation."""
+    return 0 if size == 0 else 1 << (size.bit_length() - 1)
+
+
 def _string_property(body: str, property_name: str) -> str | None:
     matches = list(re.finditer(
         rf"(?m)^\s*{re.escape(property_name)}\s*=\s*\"([^\"]+)\"\s*;",
@@ -210,9 +241,12 @@ def _fold_cells(cells: list[int]) -> int:
 
 
 def _reg_ranges(body: str, address_cells: int, size_cells: int) -> list[tuple[int, int]]:
-    cells = _cells(body, "reg")
-    if cells is None:
+    parsed = _cells_with_width(body, "reg")
+    if parsed is None:
         return []
+    cells, bits = parsed
+    if bits != 32:
+        raise AssertionError("reg must use 32-bit cells")
     tuple_cells = address_cells + size_cells
     if tuple_cells <= 0 or len(cells) % tuple_cells:
         raise AssertionError("reg must contain complete address/size tuples")
@@ -287,6 +321,11 @@ def validate_ramoops_contract(dts: str) -> None:
                 buffer_sizes.append((property_name, value))
         if not buffer_sizes or not any(size > 0 for _, size in buffer_sizes):
             raise AssertionError(f"ramoops node {name} needs a nonzero buffer size")
+        for property_name, buffer_size in buffer_sizes:
+            if buffer_size and _driver_zone_size(buffer_size) <= _PERSISTENT_RAM_HEADER_SIZE:
+                raise AssertionError(
+                    f"ramoops {property_name} is too small for the persistent-RAM header"
+                )
         if sum(size for _, size in buffer_sizes) > reserved_size:
             raise AssertionError(
                 f"ramoops buffers exceed the reserved region for node {name}"
@@ -305,15 +344,16 @@ def validate_ramoops_contract(dts: str) -> None:
                 for property_name, buffer_size in buffer_sizes:
                     if not buffer_size:
                         continue
-                    if buffer_size <= ecc_size:
+                    zone_size = _driver_zone_size(buffer_size)
+                    if zone_size <= ecc_size:
                         raise AssertionError(
                             f"ramoops ecc-size is too large for {property_name}"
                         )
                     ecc_blocks = (
-                        buffer_size - ecc_size + 128 + ecc_size - 1
+                        zone_size - ecc_size + 128 + ecc_size - 1
                     ) // (128 + ecc_size)
                     ecc_total = (ecc_blocks + 1) * ecc_size
-                    if ecc_total >= buffer_size:
+                    if ecc_total >= zone_size:
                         raise AssertionError(
                             f"ramoops ecc-size is unusable for {property_name}"
                         )
@@ -444,6 +484,32 @@ class Mt8163PstoreContractTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "enabled"):
             validate_ramoops_contract(dts)
 
+    def test_ramoops_applies_delete_property_directive(self) -> None:
+        dts = self._with_ramoops(
+            self.dts,
+            """\t\tramoops_label: ramoops@4f000000 {
+\t\t\tcompatible = \"ramoops\";
+\t\t\treg = <0x00 0x4f000000 0x00 0x200000>;
+\t\t\trecord-size = <0x10000>;
+\t\t};""",
+        )
+        dts += "\n&ramoops_label { /delete-property/ compatible; };\n"
+        self.assertEqual([], _ramoops_children(dts))
+        validate_ramoops_contract(dts)
+
+    def test_ramoops_applies_delete_node_directive(self) -> None:
+        dts = self._with_ramoops(
+            self.dts,
+            """\t\tramoops_label: ramoops@4f000000 {
+\t\t\tcompatible = \"ramoops\";
+\t\t\treg = <0x00 0x4f000000 0x00 0x200000>;
+\t\t\trecord-size = <0x10000>;
+\t\t};""",
+        )
+        dts += "\n/delete-node/ &ramoops_label;\n"
+        self.assertEqual([], _ramoops_children(dts))
+        validate_ramoops_contract(dts)
+
     def test_ramoops_rejects_disabled_node(self) -> None:
         dts = self._with_ramoops(
             self.dts,
@@ -518,6 +584,18 @@ class Mt8163PstoreContractTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "32-bit"):
             validate_ramoops_contract(dts)
 
+    def test_ramoops_rejects_non_32_bit_reg_encoding(self) -> None:
+        dts = self._with_ramoops(
+            self.dts,
+            """\t\tramoops@45000000 {
+\t\t\tcompatible = \"ramoops\";
+\t\t\treg = /bits/ 16 <0 0x4500 0 0x2000>;
+\t\t\trecord-size = <0x10000>;
+\t\t};""",
+        )
+        with self.assertRaisesRegex(AssertionError, "reg must use 32-bit"):
+            validate_ramoops_contract(dts)
+
     def test_ramoops_rejects_buffers_larger_than_reserved_region(self) -> None:
         dts = self._with_ramoops(
             self.dts,
@@ -555,6 +633,18 @@ class Mt8163PstoreContractTests(unittest.TestCase):
 \t\t};""",
         )
         with self.assertRaisesRegex(AssertionError, "too large"):
+            validate_ramoops_contract(dts)
+
+    def test_ramoops_rejects_buffer_smaller_than_persistent_ram_header(self) -> None:
+        dts = self._with_ramoops(
+            self.dts,
+            """\t\tramoops@45000000 {
+\t\t\tcompatible = \"ramoops\";
+\t\t\treg = <0x00 0x45000000 0x00 0x200000>;
+\t\t\trecord-size = <1>;
+\t\t};""",
+        )
+        with self.assertRaisesRegex(AssertionError, "persistent-RAM header"):
             validate_ramoops_contract(dts)
 
     def test_ramoops_allows_zero_sized_optional_ecc_buffer(self) -> None:
