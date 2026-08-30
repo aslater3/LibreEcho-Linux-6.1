@@ -414,6 +414,30 @@ static void mt8163_musb_restart_session_as_host(struct mtk_glue *glue)
 		 (devctl >> 3) & 3, devctl & 1, i);
 }
 
+static void mt8163_musb_leave_host(struct mtk_glue *glue)
+{
+	struct musb *musb = glue->musb;
+	unsigned long flags;
+	bool clear = false;
+
+	spin_lock_irqsave(&musb->lock, flags);
+	if (musb->port1_status & USB_PORT_STAT_ENABLE) {
+		glue->synthetic_connection = false;
+		musb_root_disconnect(musb);
+	} else if (glue->synthetic_connection) {
+		musb->port1_status &= ~(USB_PORT_STAT_CONNECTION |
+					USB_PORT_STAT_C_CONNECTION |
+					USB_PORT_STAT_LOW_SPEED |
+					USB_PORT_STAT_HIGH_SPEED);
+		glue->synthetic_connection = false;
+		clear = true;
+	}
+	spin_unlock_irqrestore(&musb->lock, flags);
+
+	if (clear && musb->hcd)
+		usb_hcd_poll_rh_status(musb->hcd);
+}
+
 static void mt8163_musb_clear_synthetic_connection(struct mtk_glue *glue)
 {
 	struct musb *musb = glue->musb;
@@ -509,8 +533,8 @@ static void mt8163_musb_rescan_port(struct mtk_glue *glue)
 	 */
 	usb_hcd_resume_root_hub(musb->hcd);
 	usb_hcd_poll_rh_status(musb->hcd);
-	schedule_delayed_work(&glue->rescan_cleanup_work,
-			      msecs_to_jiffies(5000));
+	mod_delayed_work(system_wq, &glue->rescan_cleanup_work,
+			msecs_to_jiffies(5000));
 }
 
 static void mtk_musb_restore_gadget_pullup(struct musb *musb)
@@ -662,7 +686,7 @@ static int mtk_otg_switch_set(struct mtk_glue *glue, enum usb_role role)
 		}
 		break;
 	case USB_ROLE_DEVICE:
-		mt8163_musb_clear_synthetic_connection(glue);
+		mt8163_musb_leave_host(glue);
 		musb->xceiv->otg->state = OTG_STATE_B_IDLE;
 		glue->phy_mode = PHY_MODE_USB_DEVICE;
 		new_role = USB_ROLE_DEVICE;
@@ -675,7 +699,7 @@ static int mtk_otg_switch_set(struct mtk_glue *glue, enum usb_role role)
 		mtk_musb_restore_gadget_pullup(musb);
 		break;
 	case USB_ROLE_NONE:
-		mt8163_musb_clear_synthetic_connection(glue);
+		mt8163_musb_leave_host(glue);
 		glue->phy_mode = PHY_MODE_USB_OTG;
 		new_role = USB_ROLE_NONE;
 		devctl &= ~MUSB_DEVCTL_SESSION;

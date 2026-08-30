@@ -47,6 +47,7 @@ def main():
     worker = function_body(text, "static void mtk_musb_mode_work(")
     transition = function_body(text, "static int mtk_otg_switch_set(")
     restore = function_body(text, "static void mtk_musb_restore_gadget_pullup(")
+    leave_host = function_body(text, "static void mt8163_musb_leave_host(")
     rescan = function_body(text, "static void mt8163_musb_rescan_port(")
     clear_synthetic = function_body(
         text, "static void mt8163_musb_clear_synthetic_connection("
@@ -86,8 +87,8 @@ def main():
         failures.append(
             "device-role transition must restore the requested gadget pull-up"
         )
-    elif "mt8163_musb_clear_synthetic_connection" not in transition:
-        failures.append("role transition must clear fabricated connection state")
+    elif "mt8163_musb_leave_host" not in transition:
+        failures.append("role transition must cleanly leave the host role")
 
     if restore is None:
         failures.append("mtk_musb_restore_gadget_pullup() not found")
@@ -113,11 +114,21 @@ def main():
                     f"synthetic connection cleanup lacks required guard: {fragment}"
                 )
 
+    if leave_host is None:
+        failures.append("host-exit cleanup helper not found")
+    else:
+        for fragment in ("spin_lock_irqsave", "musb_root_disconnect",
+                         "USB_PORT_STAT_ENABLE"):
+            if fragment not in leave_host:
+                failures.append(
+                    f"host-exit cleanup lacks required step: {fragment}"
+                )
+
     if rescan is None:
         failures.append("mt8163_musb_rescan_port() not found")
     else:
         for fragment in ("spin_lock_irqsave", "synthetic_connection",
-                         "schedule_delayed_work"):
+                         "mod_delayed_work"):
             if fragment not in rescan:
                 failures.append(
                     f"synthetic rescan lacks required state step: {fragment}"
