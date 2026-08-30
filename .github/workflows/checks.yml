@@ -89,6 +89,9 @@ jobs:
       - name: Run MT8163 console diag contract
         run: python3 drivers/usb/musb/test_mt8163_console_diag_contract.py
 
+      - name: Run MT8163 MCLK pinctrl contract
+        run: python3 sound/soc/mediatek/mt8163/test_mt8163_mclk_pinctrl_contract.py
+
       - name: Run WEXT and cfg80211 regression contract
         run: python3 drivers/misc/mediatek/mt8163-connectivity/test_wext_cfg80211_fallback.py
 
