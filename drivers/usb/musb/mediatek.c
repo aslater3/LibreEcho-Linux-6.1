@@ -1023,6 +1023,7 @@ static int mtk_musb_exit(struct musb *musb)
 	struct device *dev = musb->controller;
 	struct mtk_glue *glue = dev_get_drvdata(dev->parent);
 
+	cancel_delayed_work_sync(&glue->diag_work);
 	cancel_delayed_work_sync(&glue->rescan_cleanup_work);
 	cancel_work_sync(&glue->mode_work);
 	if (musb->port_mode == MUSB_OTG)

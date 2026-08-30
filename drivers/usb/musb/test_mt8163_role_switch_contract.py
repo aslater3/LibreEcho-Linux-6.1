@@ -138,6 +138,8 @@ def main():
         failures.append("role-switch worker is not cancelled during teardown")
     if "cancel_delayed_work_sync(&glue->rescan_cleanup_work)" not in text:
         failures.append("synthetic rescan cleanup is not cancelled during teardown")
+    if "cancel_delayed_work_sync(&glue->diag_work)" not in text:
+        failures.append("recurring diagnostics are not cancelled during child teardown")
     if "INIT_WORK(&glue->mode_work, mtk_musb_mode_work)" not in text:
         failures.append("role-switch worker is not initialized")
     if "INIT_DELAYED_WORK(&glue->rescan_cleanup_work," not in text:
