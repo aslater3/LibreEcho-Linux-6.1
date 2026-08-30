@@ -92,6 +92,9 @@ jobs:
       - name: Run MT8163 MCLK pinctrl contract
         run: python3 sound/soc/mediatek/mt8163/test_mt8163_mclk_pinctrl_contract.py
 
+      - name: Run MT8163 pstore source contract
+        run: python3 tools/mt8163_pstore_contract_test.py
+
       - name: Run WEXT and cfg80211 regression contract
         run: python3 drivers/misc/mediatek/mt8163-connectivity/test_wext_cfg80211_fallback.py
 
