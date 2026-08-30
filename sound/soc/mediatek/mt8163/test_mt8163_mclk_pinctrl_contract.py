@@ -19,9 +19,11 @@ DTS = ROOT / "arch/arm/boot/dts/libreecho-radar-puffin.dts"
 AFE = ROOT / "sound/soc/mediatek/mt8163/mt8163-afe.c"
 
 # These are the states selected by the AFE playback/output helpers.  The PMIC
-# states are separate codec-clock modes; this contract covers the six output
-# and teardown states changed by the fix.
+# states are separate codec-clock modes; this contract covers every output
+# and teardown state that can replace the shared pinctrl selection.
 PLAYBACK_STATES = (
+    "audpmicclk-speaker-mode0",
+    "audpmicclk-speaker-mode1",
     "audi2s1-speaker-mode0",
     "audi2s1-speaker-mode1",
     "extamp-pullhigh",
@@ -76,6 +78,20 @@ def parse_phandles(value):
         int(token, 0)
         for token in re.findall(r"0x[0-9a-fA-F]+|\d+", value)
     }
+
+
+def phandle_node_bodies(text):
+    """Return node bodies indexed by their explicit phandle value."""
+    nodes = {}
+    for match in re.finditer(r"(?m)^\s*([A-Za-z0-9_@,-]+)\s*\{", text):
+        body = node_body(text[match.start() :], match.group(1))
+        if body is None:
+            continue
+        phandle = re.search(r"(?:linux,)?phandle\s*=\s*<([^>]+)>\s*;", body)
+        if phandle:
+            for value in parse_phandles(phandle.group(1)):
+                nodes[value] = body
+    return nodes
 
 
 def check_contract(dts_text, afe_text):
@@ -134,6 +150,17 @@ def check_contract(dts_text, afe_text):
     if not mclk_refs:
         failures.append("cmmclk-mclk has no pinctrl phandle")
         return failures
+
+    phandle_nodes = phandle_node_bodies(dts_text)
+    for phandle in mclk_refs:
+        body = phandle_nodes.get(phandle)
+        if body is None:
+            failures.append(f"cmmclk-mclk phandle 0x{phandle:x} is not defined")
+        elif "pinmux = <0x7701>" not in body:
+            failures.append(
+                f"cmmclk-mclk phandle 0x{phandle:x} does not configure "
+                "CMMCLK pin 119/function 1"
+            )
 
     for name in PLAYBACK_STATES:
         missing_refs = sorted(mclk_refs - states[name])

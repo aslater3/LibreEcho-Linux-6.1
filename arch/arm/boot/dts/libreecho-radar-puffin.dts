@@ -2140,8 +2140,8 @@
 			/* Preserve the accepted 3.18-style amp and DAC-mux pinctrl path.
 			 * Direct GPIO descriptors bypass these board-calibrated states. */
 			pinctrl-names = "audpmicclk-speaker-mode0\0audpmicclk-speaker-mode1\0audi2s1-speaker-mode0\0audi2s1-speaker-mode1\0extamp-pullhigh\0extamp-pulllow\0cmmclk-mclk\0extamp-dacmux-pullhigh\0extamp-dacmux-pulllow";
-			pinctrl-0 = <0x4c>;
-			pinctrl-1 = <0x4d>;
+			pinctrl-0 = <0x4c 0x2c>;
+			pinctrl-1 = <0x4d 0x2c>;
 			pinctrl-2 = <0x4a 0x2c>;
 			pinctrl-3 = <0x4b 0x2c>;
 			pinctrl-4 = <0x2a 0x2c>;
