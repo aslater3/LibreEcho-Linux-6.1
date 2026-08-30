@@ -33,7 +33,7 @@ PRODUCTION_DTS = ROOT / "arch/arm/boot/dts/libreecho-radar-puffin.dts"
 README = ROOT / "README.md"
 
 _NODE_LINE = re.compile(
-    r"^[ \t]*(?:(?:[A-Za-z_][A-Za-z0-9_-]*):\s*)?"
+    r"^[ \t]*(?:(?P<label>[A-Za-z_][A-Za-z0-9_-]*):\s*)?"
     r"(?P<name>[A-Za-z0-9_.,+\-]+(?:@[A-Za-z0-9_x+\-]+)?)\s*\{"
 )
 
@@ -106,9 +106,9 @@ def _reserved_memory_body(dts: str) -> str | None:
     return "\n".join(bodies) if bodies else None
 
 
-def _direct_children(reserved_body: str) -> list[tuple[str, str]]:
+def _direct_children(reserved_body: str) -> list[tuple[str, str, str | None]]:
     """Extract direct child node names and bodies from reserved-memory."""
-    children: list[tuple[str, str]] = []
+    children: list[tuple[str, str, str | None]] = []
     index = 0
     while index < len(reserved_body):
         line_end = reserved_body.find("\n", index)
@@ -118,7 +118,13 @@ def _direct_children(reserved_body: str) -> list[tuple[str, str]]:
         match = _NODE_LINE.match(line)
         if match is not None:
             opening = index + match.end() - 1
-            children.append((match.group("name"), _balanced_body(reserved_body, opening)))
+            children.append(
+                (
+                    match.group("name"),
+                    _balanced_body(reserved_body, opening),
+                    match.group("label"),
+                )
+            )
             node_end = opening + len(_balanced_body(reserved_body, opening)) + 2
             index = node_end
             continue
@@ -128,10 +134,22 @@ def _direct_children(reserved_body: str) -> list[tuple[str, str]]:
 
 def _reserved_children(dts: str) -> list[tuple[str, str]]:
     """Merge child nodes declared across all reserved-memory fragments."""
+    dts = _preprocess_dts(dts)
     fragments: dict[str, list[str]] = {}
+    labels: dict[str, str] = {}
     for reserved_body in _reserved_memory_bodies(dts):
-        for name, body in _direct_children(reserved_body):
+        for name, body, label in _direct_children(reserved_body):
             fragments.setdefault(name, []).append(body)
+            if label is not None:
+                labels[label] = name
+
+    override_pattern = re.compile(r"(?m)^[ \t]*&(?P<label>[A-Za-z_][A-Za-z0-9_-]*)\s*\{")
+    for match in override_pattern.finditer(dts):
+        name = labels.get(match.group("label"))
+        if name is None:
+            continue
+        opening = dts.find("{", match.start(), match.end())
+        fragments[name].append(_balanced_body(dts, opening))
     return [(name, "\n".join(bodies)) for name, bodies in fragments.items()]
 
 
@@ -141,9 +159,10 @@ def _cells_with_width(body: str, property_name: str) -> tuple[list[int], int] | 
         r"(?:(?:/bits/[ \t]+(?P<bits>\d+))[ \t]*)?"
         r"<(?P<cells>[^>]*)>;"
     )
-    match = re.search(pattern, body)
-    if match is None:
+    matches = list(re.finditer(pattern, body))
+    if not matches:
         return None
+    match = matches[-1]
     try:
         cells = [int(token, 0) for token in match.group("cells").split()]
     except ValueError as exc:
@@ -169,11 +188,11 @@ def _u32_property(body: str, property_name: str) -> int | None:
 
 
 def _string_property(body: str, property_name: str) -> str | None:
-    match = re.search(
+    matches = list(re.finditer(
         rf"(?m)^\s*{re.escape(property_name)}\s*=\s*\"([^\"]+)\"\s*;",
         body,
-    )
-    return match.group(1) if match else None
+    ))
+    return matches[-1].group(1) if matches else None
 
 
 def _fold_cells(cells: list[int]) -> int:
@@ -267,12 +286,18 @@ def validate_ramoops_contract(dts: str) -> None:
             raise AssertionError(
                 f"ramoops buffers exceed the reserved region for node {name}"
             )
+        for property_name in ("mem-type", "flags", "max-reason"):
+            value = _u32_property(body, property_name)
+            if value is not None and value > 0x7FFFFFFF:
+                raise AssertionError(f"ramoops {property_name} must fit signed int")
         ecc_size = _u32_property(body, "ecc-size")
         if ecc_size is not None:
             if ecc_size > 0x7FFFFFFF:
                 raise AssertionError("ramoops ecc-size must fit signed int")
             if ecc_size:
                 for property_name, buffer_size in buffer_sizes:
+                    if not buffer_size:
+                        continue
                     if buffer_size <= ecc_size:
                         raise AssertionError(
                             f"ramoops ecc-size is too large for {property_name}"
@@ -386,6 +411,19 @@ class Mt8163PstoreContractTests(unittest.TestCase):
         self.assertIn("ramoops@4f000000", [name for name, _ in _ramoops_children(composed)])
         validate_ramoops_contract(composed)
 
+    def test_ramoops_applies_labeled_child_override(self) -> None:
+        dts = self._with_ramoops(
+            self.dts,
+            """\t\tramoops_label: ramoops@4f000000 {
+\t\t\tcompatible = \"ramoops\";
+\t\t\treg = <0x00 0x4f000000 0x00 0x200000>;
+\t\t\trecord-size = <0x10000>;
+\t\t};""",
+        )
+        dts += "\n&ramoops_label {\n\tstatus = \"disabled\";\n};\n"
+        with self.assertRaisesRegex(AssertionError, "enabled"):
+            validate_ramoops_contract(dts)
+
     def test_ramoops_rejects_disabled_node(self) -> None:
         dts = self._with_ramoops(
             self.dts,
@@ -498,6 +536,34 @@ class Mt8163PstoreContractTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(AssertionError, "too large"):
             validate_ramoops_contract(dts)
+
+    def test_ramoops_allows_zero_sized_optional_ecc_buffer(self) -> None:
+        dts = self._with_ramoops(
+            self.dts,
+            """\t\tramoops@45000000 {
+\t\t\tcompatible = \"ramoops\";
+\t\t\treg = <0x00 0x45000000 0x00 0x200000>;
+\t\t\trecord-size = <0x10000>;
+\t\t\tconsole-size = <0>;
+\t\t\tecc-size = <0x10>;
+\t\t};""",
+        )
+        validate_ramoops_contract(dts)
+
+    def test_ramoops_rejects_driver_u32_values_above_signed_int(self) -> None:
+        for property_name in ("mem-type", "flags", "max-reason"):
+            with self.subTest(property_name=property_name):
+                dts = self._with_ramoops(
+                    self.dts,
+                    f"""\t\tramoops@45000000 {{
+\t\t\tcompatible = \"ramoops\";
+\t\t\treg = <0x00 0x45000000 0x00 0x200000>;
+\t\t\trecord-size = <0x10000>;
+\t\t\t{property_name} = <0xffffffff>;
+\t\t}};""",
+                )
+                with self.assertRaisesRegex(AssertionError, "signed int"):
+                    validate_ramoops_contract(dts)
 
     def test_ramoops_rejects_multiple_reg_tuples(self) -> None:
         dts = self._with_ramoops(
