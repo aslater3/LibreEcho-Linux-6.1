@@ -291,11 +291,32 @@ static int is31fl32xx_software_shutdown(struct is31fl32xx_priv *priv,
 static int is31fl32xx_init_regs(struct is31fl32xx_priv *priv)
 {
 	const struct is31fl32xx_chipdef *cdef = priv->cdef;
+	unsigned int i;
 	int ret;
 
 	ret = is31fl32xx_reset_regs(priv);
 	if (ret)
 		return ret;
+
+	/*
+	 * Resetting the controller does not make the initial PWM frame explicit.
+	 * Stage an all-off frame before exposing any enabled channels.  The
+	 * IS31FL3216 custom reset already performs this step while shutdown is
+	 * asserted, so avoid duplicating its writes here.
+	 */
+	if (!cdef->reset_func) {
+		for (i = 0; i < cdef->channels; i++) {
+			ret = is31fl32xx_write(priv,
+					       cdef->pwm_register_base + i,
+					       0x00);
+			if (ret)
+				return ret;
+		}
+
+		ret = is31fl32xx_write(priv, cdef->pwm_update_reg, 0);
+		if (ret)
+			return ret;
+	}
 
 	/*
 	 * Set enable bit for all channels.
