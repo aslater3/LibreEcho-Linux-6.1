@@ -1052,8 +1052,18 @@
 					mediatek,long-press-mode = <0x01>;
 					power-off-time-sec = <0x00>;
 
+					/*
+					 * This PMIC key is the microphone-mute button, not a power
+					 * button -- the board has no separate power button, and the
+					 * vendor keypad node says so itself with
+					 * mediatek,kpd-sw-pwrkey = <0x71> (KEY_MUTE). Declaring it
+					 * 0x74 (KEY_POWER) made every press arrive under a code
+					 * nothing handles, so mute did nothing and looked like dead
+					 * hardware. Measured: ten presses produced ten KEY_POWER
+					 * events and no other code.
+					 */
 					power {
-						linux,keycodes = <0x74>;
+						linux,keycodes = <0x71>;
 						wakeup-source;
 					};
 
@@ -3019,6 +3029,33 @@
 		gpios = <&pio 0x57 0x01>;
 		hw_latch = <0x00>;
 		bright-state-gpio = <&pio 0x58 0x01>;
+	};
+
+	/*
+	 * The action button, on KPCOL0. The vendor reaches it through
+	 * mediatek,mt8163-keypad as KEY_HELP (0x8a, the single non-zero entry
+	 * in its kpd-hw-init-map) and that controller has no driver here, so
+	 * the button emitted nothing at all until this node existed.
+	 *
+	 * Identified by counting, not by correlation: all three keypad pins
+	 * nothing else claims were declared with distinct codes, and KPCOL0
+	 * reported 18 times across a window of deliberate presses while KPROW0
+	 * and KPROW1 each fired exactly once during boot and never again.
+	 * Those two are floating; an earlier attempt that trusted one of their
+	 * boot fires wired the wrong pin and the button stayed dead.
+	 *
+	 * Its own node so that if this pin is ever claimed elsewhere it fails
+	 * to probe alone rather than taking the volume keys with it.
+	 */
+	action_key {
+		compatible = "gpio-keys";
+
+		action@36 {
+			label = "Action Key";
+			linux,code = <0x8a>;
+			gpios = <&pio 0x24 0x01>;
+			debounce-interval = <0x14>;
+		};
 	};
 
 	keys {
