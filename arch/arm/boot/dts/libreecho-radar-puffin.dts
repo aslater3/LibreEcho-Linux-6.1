@@ -131,9 +131,24 @@
 			reg = <0x00 0x43000000 0x00 0x30000>;
 		};
 
-		ram_console-reserved-memory@44400000 {
-			compatible = "mediatek,ram_console";
+		/*
+		 * MediaTek reserves 2 MiB here for its ram_console, but no driver
+		 * in this kernel binds "mediatek,ram_console" -- the region was
+		 * reserved and then read by nothing. Bind it to pstore/ramoops so
+		 * the kernel console, panic/oops records and a userspace message
+		 * channel survive a reboot and can be read back from
+		 * /sys/fs/pstore after the device comes up.
+		 *
+		 * The zones sum to 0x120000 (1.125 MiB), inside the 2 MiB region.
+		 */
+		ramoops@44400000 {
+			compatible = "ramoops";
 			reg = <0x00 0x44400000 0x00 0x200000>;
+			console-size = <0x80000>;
+			pmsg-size = <0x40000>;
+			record-size = <0x40000>;
+			ftrace-size = <0x20000>;
+			ecc-size = <0x10>;
 		};
 
 		consys-reserve-memory {
@@ -828,8 +843,7 @@
 				};
 
 				pins_i2s_dat {
-					pinmux = <0x2e00 0x2f00 0x3000 0x7700>;
-				};
+					pinmux = <0x2e00 0x2f00 0x3000>;				};
 			};
 
 			pmicclkspeaker_mode1 {
@@ -849,7 +863,7 @@
 				};
 
 				pins_i2s_dat {
-					pinmux = <0x2e02 0x2f02 0x3002 0x7701>;
+					pinmux = <0x2e02 0x2f02 0x3002>;
 				};
 			};
 
@@ -2264,16 +2278,16 @@
 			/* Preserve the accepted 3.18-style amp and DAC-mux pinctrl path.
 			 * Direct GPIO descriptors bypass these board-calibrated states. */
 			pinctrl-names = "audpmicclk-speaker-mode0\0audpmicclk-speaker-mode1\0audi2s1-speaker-mode0\0audi2s1-speaker-mode1\0extamp-pullhigh\0extamp-pulllow\0cmmclk-mclk\0extamp-dacmux-pullhigh\0extamp-dacmux-pulllow";
-			pinctrl-0 = <0x4c>;
-			pinctrl-1 = <0x4d>;
-			pinctrl-2 = <0x4a>;
-			pinctrl-3 = <0x4b>;
-			pinctrl-4 = <0x2a>;
-			pinctrl-5 = <0x2b>;
+			pinctrl-0 = <0x4c 0x2c>;
+			pinctrl-1 = <0x4d 0x2c>;
+			pinctrl-2 = <0x4a 0x2c>;
+			pinctrl-3 = <0x4b 0x2c>;
+			pinctrl-4 = <0x2a 0x2c>;
+			pinctrl-5 = <0x2b 0x2c>;
 			pinctrl-6 = <0x2c>;
 			status = "okay";
-			pinctrl-7 = <0x31>;
-			pinctrl-8 = <0x32>;
+			pinctrl-7 = <0x31 0x2c>;
+			pinctrl-8 = <0x32 0x2c>;
 		};
 
 		mt_soc_ul1_pcm@11220000 {

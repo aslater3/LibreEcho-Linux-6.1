@@ -65,6 +65,36 @@ The final LibreEcho pipeline remains the authority for the stock-v184 Android
 boot envelope, initramfs, feature payloads, signing, and image verification.
 This repository must not be used to flash a device directly.
 
+## MT8163 pstore/ramoops source boundary
+
+Issue #6 is intentionally source-blocked on the current kernel baseline. The
+production DT contains platform-owned reserved-memory nodes, including the
+vendor `mediatek,ram_console` region, but it does not identify a firmware-owned
+region that is safe to hand to `ramoops`. This tree therefore does **not** add a
+new memory address, reuse an existing reserved range, or enable only
+`CONFIG_PSTORE` / `CONFIG_PSTORE_RAM` in the kernel defconfig.
+
+The production initramfs and its `/data` archival/rotation policy are owned by
+the separate `LibreEcho-Platform` repository, not by this kernel source tree.
+A complete implementation must be reviewed across all three layers before any
+one of them is enabled here:
+
+1. firmware/LK and the production DT must agree on a retained, non-overlapping
+   reserved region;
+2. `mt8163_arm32_defconfig` must enable both pstore and ramoops support; and
+3. the product initramfs must mount `/sys/fs/pstore`, archive records, and apply
+   the approved rotation policy.
+
+The host-side boundary is checked with:
+
+```sh
+python3 -B tools/mt8163_pstore_contract_test.py
+```
+
+That check prevents a partial source integration; it does not claim warm-reset
+retention, deliberate-panic capture, or diagnostics-surface availability. Those
+remain physical/product integration gates.
+
 ## MT8163 Bluetooth HCI contract
 
 The MT8163 Bluetooth bridge is built into the production kernel. The committed
