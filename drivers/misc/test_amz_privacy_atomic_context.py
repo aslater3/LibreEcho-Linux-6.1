@@ -74,8 +74,8 @@ def main():
     failures = []
     kconfig = (DRIVER.parent / "Kconfig").read_text(encoding="utf-8")
     privacy_config = re.search(r"(?ms)^config AMZ_PRIVACY\n(.*?)(?=^config |^source |\Z)", kconfig)
-    if not privacy_config or not re.search(r"depends on [^\n]*\bINPUT\b", privacy_config.group(1)):
-        failures.append("AMZ_PRIVACY must depend on INPUT for its input-handler APIs")
+    if not privacy_config or not re.search(r"depends on [^\n]*\bINPUT\s*=\s*y\b", privacy_config.group(1)):
+        failures.append("AMZ_PRIVACY must depend on INPUT=y for built-in input-handler APIs")
 
     if not DRIVER.exists():
         print(f"amz_privacy atomic-context contract: FAIL\n  - {DRIVER} is missing")

@@ -499,7 +499,7 @@ config VCPU_STALL_DETECTOR
 
 config AMZ_PRIVACY
 	bool "Amazon hardware privacy control"
-	depends on OF && GPIOLIB && INPUT
+	depends on OF && GPIOLIB && INPUT=y
 	help
 	  Enable the Amazon hardware privacy GPIO control used by
 	  Radar-Puffin devices. The driver retains the vendor sysfs
