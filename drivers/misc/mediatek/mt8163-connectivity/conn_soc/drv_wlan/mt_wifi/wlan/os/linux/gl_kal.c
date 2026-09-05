@@ -1730,14 +1730,16 @@ kalIndicateStatusAndComplete(IN P_GLUE_INFO_T prGlueInfo, IN WLAN_STATUS eStatus
 
 		netif_carrier_off(prGlueInfo->prDevHandler);
 
-		if (prGlueInfo->fgIsRegistered == TRUE
-		    && eStatus == WLAN_STATUS_MEDIA_DISCONNECT) {
+		if (prGlueInfo->fgIsRegistered == TRUE) {
 			P_WIFI_VAR_T prWifiVar = &prGlueInfo->prAdapter->rWifiVar;
 			UINT_16 u2DeauthReason = prWifiVar->arBssInfo[NETWORK_TYPE_AIS_INDEX].u2DeauthReason;
 			/* CFG80211 Indication */
 			DBGLOG(AIS, INFO, "[wifi] %s cfg80211_disconnected\n", prGlueInfo->prDevHandler->name);
 			cfg80211_disconnected(prGlueInfo->prDevHandler,
-					      u2DeauthReason, NULL, 0, false,
+					      eStatus == WLAN_STATUS_MEDIA_DISCONNECT_LOCALLY ?
+					      WLAN_REASON_UNSPECIFIED : u2DeauthReason,
+					      NULL, 0,
+					      eStatus == WLAN_STATUS_MEDIA_DISCONNECT_LOCALLY,
 					      GFP_KERNEL);
 		}
 
