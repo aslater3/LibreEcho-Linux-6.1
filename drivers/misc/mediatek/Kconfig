@@ -22,6 +22,16 @@ config MTK_MT8163_CONSYS
 	  This is an isolated forward port of the vendor Linux 3.18 driver.
 	  It is intended only for MT8163 systems carrying that legacy ABI.
 
+config IDME
+	bool "Amazon IDME-backed MT8163 WLAN identity"
+	depends on MTK_MT8163_CONSYS && OF
+	default y if MTK_MT8163_CONSYS
+	help
+	  Enable the retained MT8163 vendor WLAN path that reads the factory
+	  Wi-Fi identity and manufacturing data from the Amazon IDME device-tree
+	  nodes. On Radar/Puffin this supplies /idme/mac_addr to the WLAN
+	  registration path instead of falling back to a boot-time generated MAC.
+
 config MTK_COMBO
 	bool
 	default y if MTK_MT8163_CONSYS
