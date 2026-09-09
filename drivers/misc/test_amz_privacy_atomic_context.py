@@ -72,6 +72,10 @@ def function_body(text, signature_fragment):
 
 def main():
     failures = []
+    kconfig = (DRIVER.parent / "Kconfig").read_text(encoding="utf-8")
+    privacy_config = re.search(r"(?ms)^config AMZ_PRIVACY\n(.*?)(?=^config |^source |\Z)", kconfig)
+    if not privacy_config or not re.search(r"depends on [^\n]*\bINPUT\s*=\s*y\b", privacy_config.group(1)):
+        failures.append("AMZ_PRIVACY must depend on INPUT=y for built-in input-handler APIs")
 
     if not DRIVER.exists():
         print(f"amz_privacy atomic-context contract: FAIL\n  - {DRIVER} is missing")
@@ -113,6 +117,10 @@ def main():
     if connect is None:
         failures.append("amz_privacy_input_connect() not found")
     else:
+        if not re.search(r'!dev->name\s*\|\|\s*strcmp\(dev->name,', connect):
+            failures.append(
+                "amz_privacy_input_connect() must reject unnamed devices before strcmp"
+            )
         if 'strcmp(dev->name, "mtk-pmic-keys")' not in connect:
             failures.append(
                 "amz_privacy_input_connect() must reject non-PMIC input devices"

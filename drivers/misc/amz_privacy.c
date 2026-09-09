@@ -203,7 +203,7 @@ static int amz_privacy_input_connect(struct input_handler *handler,
 	struct input_handle *handle;
 	int ret;
 
-	if (strcmp(dev->name, "mtk-pmic-keys"))
+	if (!dev->name || strcmp(dev->name, "mtk-pmic-keys"))
 		return -ENODEV;
 
 	handle = kzalloc(sizeof(*handle), GFP_KERNEL);
