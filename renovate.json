@@ -1,0 +1,44 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigests"
+  ],
+  "timezone": "Europe/London",
+  "dependencyDashboard": true,
+  "dependencyDashboardTitle": "Dependency Dashboard",
+  "prConcurrentLimit": 4,
+  "prHourlyLimit": 2,
+  "automerge": false,
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Track the maintained Linux 6.1 longterm baseline as a review signal",
+      "managerFilePatterns": [
+        "/^\\.github\\/renovate-upstreams\\.env$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>[a-zA-Z0-9-._]+) depName=(?<depName>[^\\s]+)(?: versioning=(?<versioning>[^\\s]+))?\\s+[A-Z0-9_]+_VERSION=(?<currentValue>[^\\s#]+)"
+      ],
+      "versioningTemplate": "{{#if versioning}}{{{versioning}}}{{else}}semver-coerced{{/if}}"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Kernel stable-line changes are audit signals until explicitly approved",
+      "matchFileNames": [
+        ".github/renovate-upstreams.env"
+      ],
+      "allowedVersions": "/^v6\\.1\\.[0-9]+$/",
+      "dependencyDashboardApproval": true,
+      "groupName": "Linux 6.1 stable baseline"
+    },
+    {
+      "description": "Group GitHub Actions maintenance",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "groupName": "GitHub Actions"
+    }
+  ]
+}
