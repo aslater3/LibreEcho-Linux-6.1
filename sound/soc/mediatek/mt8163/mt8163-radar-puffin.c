@@ -606,13 +606,9 @@ static int radar_speaker_safe(struct radar_card *priv)
 					    RADAR_HP_DRIVER_MUTE,
 					    RADAR_HP_DRIVER_MUTE);
 	radar_record_error(&first, ret);
-	/* Restore 0 dB attenuation; DACMUTE above provides the shutdown mute. */
-	ret = snd_soc_component_write(codec_dai->component,
-				      RADAR_LDACVOL, 0);
-	radar_record_error(&first, ret);
-	ret = snd_soc_component_write(codec_dai->component,
-				      RADAR_RDACVOL, 0);
-	radar_record_error(&first, ret);
+	/* DACMUTE and the analogue/external gates provide the shutdown mute.
+	 * Leave LDACVOL/RDACVOL untouched so the user's configured PCM volume
+	 * survives close/reopen instead of being reset to 0 dB. */
 	ret = snd_soc_component_write(codec_dai->component,
 				      RADAR_DAC_DOUTCTL, RADAR_DAC_MFP2_MUTE);
 	radar_record_error(&first, ret);
