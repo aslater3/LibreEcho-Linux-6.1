@@ -19,11 +19,15 @@ def main() -> None:
         raise SystemExit("radar_speaker_safe not found")
     safe = match.group(0)
 
-    for register in ("RADAR_LDACVOL", "RADAR_RDACVOL"):
-        if register in safe:
-            raise SystemExit(
-                f"speaker teardown must preserve configured PCM volume: {register}"
-            )
+    write_sites = re.findall(
+        r"snd_soc_component_(?:write|update_bits)\([^;]*RADAR_(?:L|R)DACVOL",
+        text,
+        re.DOTALL,
+    )
+    if write_sites:
+        raise SystemExit(
+            "machine driver must not overwrite user PCM volume registers"
+        )
 
     required_mutes = (
         "snd_soc_dai_digital_mute",
