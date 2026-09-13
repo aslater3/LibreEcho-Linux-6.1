@@ -606,13 +606,9 @@ static int radar_speaker_safe(struct radar_card *priv)
 					    RADAR_HP_DRIVER_MUTE,
 					    RADAR_HP_DRIVER_MUTE);
 	radar_record_error(&first, ret);
-	/* Restore 0 dB attenuation; DACMUTE above provides the shutdown mute. */
-	ret = snd_soc_component_write(codec_dai->component,
-				      RADAR_LDACVOL, 0);
-	radar_record_error(&first, ret);
-	ret = snd_soc_component_write(codec_dai->component,
-				      RADAR_RDACVOL, 0);
-	radar_record_error(&first, ret);
+	/* DACMUTE and the analogue/external gates provide the shutdown mute.
+	 * Leave LDACVOL/RDACVOL untouched so the user's configured PCM volume
+	 * survives close/reopen instead of being reset to 0 dB. */
 	ret = snd_soc_component_write(codec_dai->component,
 				      RADAR_DAC_DOUTCTL, RADAR_DAC_MFP2_MUTE);
 	radar_record_error(&first, ret);
@@ -887,16 +883,10 @@ static int radar_speaker_prepare(struct snd_pcm_substream *substream)
 	if (ret < 0)
 		goto fail;
 	/*
-	 * Step 6: Set DAC digital volume to 0 dB (full volume).  The
-	 * "PCM Playback Volume" mixer control maps to -60.5 dB attenuation;
-	 * 3.18 leaves DACVOL=0x00 (0 dB, full volume).
+	 * The codec's PCM volume is user-controlled.  Keep it unchanged while
+	 * enabling the speaker path; the safety mute is applied below and during
+	 * teardown.
 	 */
-	ret = snd_soc_component_write(component, RADAR_LDACVOL, 0);
-	if (ret < 0)
-		goto fail;
-	ret = snd_soc_component_write(component, RADAR_RDACVOL, 0);
-	if (ret < 0)
-		goto fail;
 	radar_log_codec_state(component, "machine-prepare-end");
 	return 0;
 fail:
