@@ -3715,24 +3715,33 @@ static void idme_get_mac_addr(P_REG_INFO_T prRegInfo)
 static int idme_get_wifi_mfg(P_REG_INFO_T prRegInfo)
 {
 	struct device_node *ap;
-	int i, len;
+	int i, len = 0;
 	int ret = 0;
 	char buf[3] = {0};
 	PUINT_8 p;
+	WIFI_CFG_PARAM_STRUCT wifi_mfg_scratch;
 
 	ap = of_find_node_by_path(IDME_OF_WIFI_MFG);
 	if (likely(ap)) {
 		const char *wifi_mfg = of_get_property(ap, "value", &len);
 
 		if (wifi_mfg && likely(len >= 1024)) {
-			p = (PUINT_8) &idme_wifi_mfg;
+			/* Decode into a scratch buffer so a malformed value
+			 * cannot leave a partially decoded blob in the global
+			 * that wlanProbe() would accept as a successful read.
+			 */
+			p = (PUINT_8) &wifi_mfg_scratch;
 			for (i = 0; i < 1024; i += 2) {
 				buf[0] = wifi_mfg[i];
 				buf[1] = wifi_mfg[i + 1];
 				ret = kstrtou8(buf, 16, &p[i/2]);
-				if (ret)
+				if (ret) {
 					DBGLOG(INIT, WARN, "kstrtou8 failed, i=%d\n", i);
+					return -1;
+				}
 			}
+			memcpy(&idme_wifi_mfg, &wifi_mfg_scratch,
+				sizeof(idme_wifi_mfg));
 		} else {
 			DBGLOG(INIT, WARN, "idme wifi_mfg len err=%d\n", len);
 			ret = -1;

@@ -73,6 +73,27 @@ def wifi_mfg_available(value):
     return value is not None and len(value) >= WIFI_MFG_HEX_CHARS
 
 
+def decode_wifi_mfg(value):
+    """Mirror idme_get_wifi_mfg(): the decoded blob, or None if rejected.
+
+    A malformed hex pair anywhere in the 1024 characters rejects the whole
+    blob so a partially decoded global is never accepted as a successful read.
+    """
+    if not wifi_mfg_available(value):
+        return None
+    decoded = bytearray(WIFI_MFG_HEX_CHARS // 2)
+    for offset in range(0, WIFI_MFG_HEX_CHARS, 2):
+        pair = value[offset:offset + 2]
+        try:
+            octet = int(pair, 16)
+        except ValueError:
+            return None
+        if octet > 0xFF:
+            return None
+        decoded[offset >> 1] = octet
+    return bytes(decoded)
+
+
 class IdmeFactoryMacBehaviourTests(unittest.TestCase):
     def test_factory_mac_is_decoded_from_the_idme_node(self) -> None:
         self.assertEqual(
@@ -108,9 +129,24 @@ class IdmeFactoryMacBehaviourTests(unittest.TestCase):
         self.assertEqual(decode_idme_mac("001122AABBZZ", fallback), fallback)
 
     def test_wifi_mfg_length_boundary_selects_the_fallback(self) -> None:
-        self.assertFalse(wifi_mfg_available("0" * (WIFI_MFG_HEX_CHARS - 2)))
-        self.assertTrue(wifi_mfg_available("0" * WIFI_MFG_HEX_CHARS))
-        self.assertFalse(wifi_mfg_available(None))
+        self.assertIsNone(decode_wifi_mfg("0" * (WIFI_MFG_HEX_CHARS - 2)))
+        self.assertIsNotNone(decode_wifi_mfg("0" * WIFI_MFG_HEX_CHARS))
+        self.assertIsNone(decode_wifi_mfg(None))
+
+    def test_wifi_mfg_decodes_a_complete_blob(self) -> None:
+        blob = decode_wifi_mfg("ab" * (WIFI_MFG_HEX_CHARS // 2))
+        self.assertIsNotNone(blob)
+        assert blob is not None
+        self.assertEqual(len(blob), WIFI_MFG_HEX_CHARS // 2)
+        self.assertEqual(blob[0], 0xAB)
+        self.assertEqual(blob[-1], 0xAB)
+
+    def test_wifi_mfg_rejects_a_partially_decoded_blob(self) -> None:
+        # A single bad pair in the middle must reject the whole read rather
+        # than leave a mixed blob that wlanProbe() treats as valid.
+        value = bytearray(b"0" * WIFI_MFG_HEX_CHARS)
+        value[512:514] = b"ZZ"
+        self.assertIsNone(decode_wifi_mfg(value.decode()))
 
 
 class IdmeSourceContractTests(unittest.TestCase):
@@ -162,7 +198,22 @@ class IdmeSourceContractTests(unittest.TestCase):
             "\nstatic ", 1
         )[0]
         self.assertIn("if (wifi_mfg && likely(len >= 1024))", body)
+        # len must be initialized so the missing-value branch does not log an
+        # indeterminate stack value.
+        self.assertIn("int i, len = 0;", body)
         self.assertIn("ret = -1;", body)
+
+    def test_wifi_mfg_rejects_a_partially_decoded_blob(self) -> None:
+        source = GL_INIT.read_text(encoding="utf-8")
+        body = source.split("static int idme_get_wifi_mfg(", 1)[1].split(
+            "\nstatic ", 1
+        )[0]
+        # Decode into scratch and commit only on full success.
+        self.assertIn("WIFI_CFG_PARAM_STRUCT wifi_mfg_scratch;", body)
+        self.assertIn("p = (PUINT_8) &wifi_mfg_scratch;", body)
+        self.assertIn("memcpy(&idme_wifi_mfg, &wifi_mfg_scratch,", body)
+        loop = body.split("for (i = 0; i < 1024; i += 2) {", 1)[1].split("}", 1)[0]
+        self.assertIn("return -1;", loop)
 
     def test_idme_success_selects_idme_and_skips_the_nvram_fallback(self) -> None:
         source = GL_INIT.read_text(encoding="utf-8")
