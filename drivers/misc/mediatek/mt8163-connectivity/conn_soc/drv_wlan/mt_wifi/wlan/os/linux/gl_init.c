@@ -3684,19 +3684,30 @@ static void idme_get_mac_addr(P_REG_INFO_T prRegInfo)
 	struct device_node *ap;
 	int len, i, ret;
 	char buf[3] = {0};
+	UINT_8 aucMacAddr[PARAM_MAC_ADDR_LEN];
 
 	ap = of_find_node_by_path(IDME_OF_MAC_ADDR);
 	if (likely(ap)) {
 		const char *mac_addr = of_get_property(ap, "value", &len);
 
-		if (likely(len >= 12)) {
-		for (i = 0; i < 12; i += 2) {
-			buf[0] = mac_addr[i];
-			buf[1] = mac_addr[i + 1];
-			ret = kstrtou8(buf, 16, &prRegInfo->aucMacAddr[i >> 1]);
-			if (ret)
-				pr_err("idme_get_mac_addr kstrtou8 failed\n");
+		/* of_get_property() leaves len untouched when the node exists
+		 * but its value property is absent, so reject a NULL value
+		 * before trusting len.  A partially decoded address would mix
+		 * factory octets with the NVRAM/default address, so decode into
+		 * a scratch buffer and only commit a fully valid value.
+		 */
+		if (mac_addr && likely(len >= 12)) {
+			for (i = 0; i < 12; i += 2) {
+				buf[0] = mac_addr[i];
+				buf[1] = mac_addr[i + 1];
+				ret = kstrtou8(buf, 16, &aucMacAddr[i >> 1]);
+				if (ret) {
+					pr_err("idme_get_mac_addr kstrtou8 failed\n");
+					return;
+				}
 			}
+			memcpy(prRegInfo->aucMacAddr, aucMacAddr,
+				PARAM_MAC_ADDR_LEN);
 		}
 	}
 }
@@ -3713,7 +3724,7 @@ static int idme_get_wifi_mfg(P_REG_INFO_T prRegInfo)
 	if (likely(ap)) {
 		const char *wifi_mfg = of_get_property(ap, "value", &len);
 
-		if (likely(len >= 1024)) {
+		if (wifi_mfg && likely(len >= 1024)) {
 			p = (PUINT_8) &idme_wifi_mfg;
 			for (i = 0; i < 1024; i += 2) {
 				buf[0] = wifi_mfg[i];
@@ -3742,7 +3753,7 @@ static void idme_get_board_id(P_REG_INFO_T prRegInfo)
 	ap = of_find_node_by_path(IDME_OF_BOARD_ID);
 	if (likely(ap)) {
 		const char *board_id = of_get_property(ap, "value", &len);
-		if (likely(len >= 16))
+		if (board_id && likely(len >= 16))
 			memcpy(idme_board_id, board_id, sizeof(idme_board_id));
 	}
 }

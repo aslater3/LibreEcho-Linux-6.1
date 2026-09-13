@@ -8,12 +8,13 @@ silently come up with a boot-time generated MAC instead of the factory address
 (or vice versa), so this contract locks down both the parsed result and the
 fallback decision.
 
-The behavioural half decodes IDME `value` properties exactly as the kernel does
-(`idme_get_mac_addr()` parses 12 hex characters, two per octet, with
-`kstrtou8(..., 16, ...)`), so a change to the wire format or the length gate is
-caught against real inputs. The source half asserts the driver, Kconfig, and
-defconfig still implement that algorithm and fallback, and that the CI runner
-executes this file.
+The behavioural half decodes IDME `value` properties exactly as the kernel now
+does: `idme_get_mac_addr()` parses 12 hex characters, two per octet, with
+`kstrtou8(..., 16, ...)` into a scratch buffer, and commits the result only when
+every octet parsed. A malformed or absent value therefore leaves the previous
+NVRAM/default address intact rather than producing a mixed address. The source
+half asserts the driver, Kconfig, and defconfig still implement that algorithm
+and fallback, and that the CI runner executes this file.
 
 Run from the kernel source root:
 
@@ -42,30 +43,29 @@ MAC_ADDR_HEX_CHARS = MAC_ADDR_OCTETS * 2
 WIFI_MFG_HEX_CHARS = 1024
 
 
-class IdmeParseError(ValueError):
-    """Raised when a pair is not valid hexadecimal, mirroring kstrtou8()."""
-
-
 def decode_idme_mac(value, current):
-    """Mirror idme_get_mac_addr(): parse ``value`` into six octets in-place.
+    """Mirror idme_get_mac_addr(): decode ``value`` or keep ``current`` intact.
 
-    ``current`` is the byte array the driver would already hold (from NVRAM or
-    the compiled default). The kernel leaves it untouched when the node is
-    missing or shorter than 12 hex characters, and skips only the offending
-    octet when a pair does not parse, so the model reproduces both.
+    ``current`` is the byte array the driver already holds (from NVRAM or the
+    compiled default). The kernel leaves it untouched when the node or its
+    value property is missing, when the value is shorter than 12 hex
+    characters, or when any octet fails to parse: it decodes into a scratch
+    buffer and commits only a fully valid address. The model reproduces that
+    all-or-nothing behaviour.
     """
     if value is None or len(value) < MAC_ADDR_HEX_CHARS:
         return list(current)
+    decoded = list(current)
     for offset in range(0, MAC_ADDR_HEX_CHARS, 2):
         pair = value[offset:offset + 2]
         try:
             octet = int(pair, 16)
-        except ValueError as exc:
-            raise IdmeParseError(pair) from exc
+        except ValueError:
+            return list(current)
         if octet > 0xFF:
-            raise IdmeParseError(pair)
-        current[offset >> 1] = octet
-    return list(current)
+            return list(current)
+        decoded[offset >> 1] = octet
+    return decoded
 
 
 def wifi_mfg_available(value):
@@ -90,14 +90,22 @@ class IdmeFactoryMacBehaviourTests(unittest.TestCase):
         fallback = [0x02, 0x11, 0x22, 0x33, 0x44, 0x55]
         self.assertEqual(decode_idme_mac(None, fallback), fallback)
 
+    def test_absent_value_property_preserves_the_fallback_mac(self) -> None:
+        # Node present but of_get_property() returns NULL: the driver must
+        # not trust the indeterminate length nor index a NULL pointer.
+        fallback = [0x02, 0x11, 0x22, 0x33, 0x44, 0x55]
+        self.assertEqual(decode_idme_mac(None, fallback), fallback)
+
     def test_short_value_preserves_the_fallback_mac(self) -> None:
         fallback = [0x02, 0x11, 0x22, 0x33, 0x44, 0x55]
         # One octet short of the 12-character gate.
         self.assertEqual(decode_idme_mac("001122AABB", fallback), fallback)
 
-    def test_non_hex_pair_is_rejected(self) -> None:
-        with self.assertRaises(IdmeParseError):
-            decode_idme_mac("001122AABBZZ", [0] * MAC_ADDR_OCTETS)
+    def test_malformed_value_preserves_the_whole_fallback_mac(self) -> None:
+        fallback = [0x02, 0x11, 0x22, 0x33, 0x44, 0x55]
+        # A non-hex pair must reject the entire value rather than leave a
+        # mixed address made of NVRAM and factory octets.
+        self.assertEqual(decode_idme_mac("001122AABBZZ", fallback), fallback)
 
     def test_wifi_mfg_length_boundary_selects_the_fallback(self) -> None:
         self.assertFalse(wifi_mfg_available("0" * (WIFI_MFG_HEX_CHARS - 2)))
@@ -124,24 +132,36 @@ class IdmeSourceContractTests(unittest.TestCase):
         self.assertIn('"/idme/board_id"', source)
         self.assertIn("of_find_node_by_path(IDME_OF_MAC_ADDR)", source)
         self.assertIn("of_find_node_by_path(IDME_OF_WIFI_MFG)", source)
+        self.assertIn("of_find_node_by_path(IDME_OF_BOARD_ID)", source)
 
-    def test_mac_decoder_matches_the_behavioural_contract(self) -> None:
+    def test_every_reader_guards_against_an_absent_value_property(self) -> None:
+        # of_get_property() leaves len untouched when the value property is
+        # absent, so each reader must test the returned pointer, not only len.
+        source = GL_INIT.read_text(encoding="utf-8")
+        for guard in ("mac_addr && likely(len >= 12)",
+                      "wifi_mfg && likely(len >= 1024)",
+                      "board_id && likely(len >= 16)"):
+            self.assertIn(guard, source)
+
+    def test_mac_decoder_rejects_a_partially_parsed_value(self) -> None:
         source = GL_INIT.read_text(encoding="utf-8")
         body = source.split("static void idme_get_mac_addr(", 1)[1].split(
             "\nstatic ", 1
         )[0]
         self.assertIn('of_get_property(ap, "value", &len)', body)
-        self.assertIn("if (likely(len >= 12))", body)
-        self.assertIn(
-            "kstrtou8(buf, 16, &prRegInfo->aucMacAddr[i >> 1]);", body
-        )
+        self.assertIn("if (mac_addr && likely(len >= 12))", body)
+        # Decode into a scratch buffer and commit only on full success.
+        self.assertIn("UINT_8 aucMacAddr[PARAM_MAC_ADDR_LEN];", body)
+        self.assertIn("kstrtou8(buf, 16, &aucMacAddr[i >> 1]);", body)
+        self.assertIn("memcpy(prRegInfo->aucMacAddr, aucMacAddr,", body)
+        self.assertIn("return;", body)
 
     def test_wifi_mfg_length_gate_matches_the_behavioural_contract(self) -> None:
         source = GL_INIT.read_text(encoding="utf-8")
         body = source.split("static int idme_get_wifi_mfg(", 1)[1].split(
             "\nstatic ", 1
         )[0]
-        self.assertIn("if (likely(len >= 1024))", body)
+        self.assertIn("if (wifi_mfg && likely(len >= 1024))", body)
         self.assertIn("ret = -1;", body)
 
     def test_idme_success_selects_idme_and_skips_the_nvram_fallback(self) -> None:
