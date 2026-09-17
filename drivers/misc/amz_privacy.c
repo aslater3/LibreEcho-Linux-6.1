@@ -36,6 +36,7 @@ struct amz_privacy {
 	bool hw_latch;
 	bool input_handler_registered;
 	bool mute_lamp;
+	bool suppress_lamp_restore;
 	int privacy_mode_status;
 	int shutdown_dialog_status;
 	int cur_priv;
@@ -132,21 +133,34 @@ static int amz_privacy_assert_latch(struct amz_privacy *priv)
 static int __amz_priv_trigger(struct amz_privacy *priv, int on)
 {
 	int ret;
+	int keep;
 
 	if (priv->disabled)
 		return 0;
 
 	on &= 1;
 
-	/* Preserve gpio_set_value() electrical semantics from the old driver. */
-	gpiod_set_raw_value_cansleep(priv->privacy_gpio, on);
-
 	/*
-	 * Radar-Puffin names the old inverse mute output "bright-state".
-	 * Descriptor polarity turns logical privacy-on into its active-low
-	 * electrical level.
+	 * The indication line is shared with a software mute that is still on, and
+	 * releasing the latch must not glitch it -- and the microphone cut with it
+	 * -- off and straight back on through the sleepable GPIO calls. The mute
+	 * request therefore decides the line, except when the caller is suppressing
+	 * the request on purpose (entering the shutdown dialog): then the caller's
+	 * level is the one to drive.
 	 */
-	amz_privacy_set_bright_state(priv, on);
+	keep = (!on && priv->mute_lamp && !priv->suppress_lamp_restore);
+	if (!keep) {
+		/* Preserve gpio_set_value() electrical semantics from the old driver. */
+		gpiod_set_raw_value_cansleep(priv->privacy_gpio, on);
+
+		/*
+		 * Radar-Puffin names the old inverse mute output "bright-state".
+		 * Descriptor polarity turns logical privacy-on into its active-low
+		 * electrical level.
+		 */
+		amz_privacy_set_bright_state(priv, on);
+	}
+
 	amz_privacy_call_callbacks(priv, on);
 
 	if (on) {
@@ -157,9 +171,6 @@ static int __amz_priv_trigger(struct amz_privacy *priv, int on)
 
 	/* State changes only after the hardware-latch assertion completes. */
 	priv->cur_priv = on;
-	/* Releasing the latch must not put out a lamp a software mute set. */
-	if (!priv->cur_priv && priv->mute_lamp)
-		amz_privacy_set_mute_lamp(priv, 1);
 	amz_privacy_notify(priv, "privacy_state");
 
 	return 0;
@@ -435,17 +446,20 @@ static ssize_t shutdown_dialog_state_store(struct device *dev,
 	priv->shutdown_dialog_status = value;
 	if (value == 1) {
 		/*
-		 * Drop the software lamp request first: this call deasserts the
-		 * outputs, and the restoration in __amz_priv_trigger() would otherwise
-		 * drive them straight back on -- with `disabled` then refusing the one
-		 * write that could clear it, leaving the lamp and the microphone cut on
-		 * for the whole of shutdown mode.
+		 * The outputs are deasserted on purpose here, and the software mute
+		 * request is left alone: suppressing it for this call keeps the
+		 * deassertion from being undone, and keeping it means cancelling the
+		 * dialog can put the lamp back instead of losing the mute.
 		 */
-		priv->mute_lamp = false;
+		priv->suppress_lamp_restore = true;
 		__amz_priv_trigger(priv, 0);
+		priv->suppress_lamp_restore = false;
 		priv->disabled = true;
 	} else {
 		priv->disabled = false;
+		/* The software mute outlived the dialog: light its lamp again. */
+		if (priv->mute_lamp && !priv->cur_priv)
+			amz_privacy_set_mute_lamp(priv, 1);
 	}
 	mutex_unlock(&amz_privacy_lock);
 

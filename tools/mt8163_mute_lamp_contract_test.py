@@ -60,11 +60,14 @@ class MuteLampContractTests(unittest.TestCase):
         latched = latched[:latched.index("-EBUSY")]
         self.assertIn("priv->mute_lamp = false;", latched)
 
-    def test_latch_release_reasserts_a_software_mute_lamp(self) -> None:
+    def test_latch_release_does_not_glitch_the_line(self) -> None:
         trigger = body_of(self.driver, "static int __amz_priv_trigger(",
                           "int amz_priv_trigger(int on)")
-        self.assertIn("if (!priv->cur_priv && priv->mute_lamp)", trigger)
-        self.assertIn("amz_privacy_set_mute_lamp(priv, 1);", trigger)
+        # A release with a software mute set keeps the line where it is instead
+        # of driving it low and back high through sleepable calls.
+        self.assertIn("keep = (!on && priv->mute_lamp && !priv->suppress_lamp_restore);",
+                      trigger)
+        self.assertIn("if (!keep) {", trigger)
 
     def test_latched_boards_are_refused(self) -> None:
         # A latched board runs privacy as an assert/acknowledge/ deassert
@@ -78,13 +81,16 @@ class MuteLampContractTests(unittest.TestCase):
         self.assertIn("if (priv->hw_latch)", show)
         self.assertIn("-EOPNOTSUPP", show)
 
-    def test_shutdown_mode_does_not_restore_the_lamp(self) -> None:
+    def test_shutdown_mode_suppresses_and_restores_the_lamp(self) -> None:
         shutdown = body_of(self.driver, "static ssize_t shutdown_dialog_state_store(",
                            "\n}\n")
-        self.assertLess(shutdown.index("priv->mute_lamp = false;"),
+        self.assertLess(shutdown.index("priv->suppress_lamp_restore = true;"),
                         shutdown.index("__amz_priv_trigger(priv, 0);"),
-                        "the lamp request must be dropped before the trigger "
-                        "that deasserts the outputs")
+                        "the deassertion must be able to suppress the mute request")
+        self.assertIn("priv->suppress_lamp_restore = false;", shutdown)
+        # The request survives the dialog, and cancelling puts the lamp back.
+        self.assertNotIn("priv->mute_lamp = false;", shutdown)
+        self.assertIn("if (priv->mute_lamp && !priv->cur_priv)", shutdown)
 
     def test_privacy_trigger_still_cannot_leave_privacy(self) -> None:
         store = body_of(self.driver, "static ssize_t privacy_trigger_store(",
