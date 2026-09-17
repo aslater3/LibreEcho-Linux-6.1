@@ -24,7 +24,12 @@ class MuteLampContractTests(unittest.TestCase):
 
     def test_control_is_built_and_exported(self) -> None:
         self.assertIn("CONFIG_AMZ_PRIVACY=y", DEFCONFIG.read_text())
-        self.assertIn("static DEVICE_ATTR_RW(mute_lamp);", self.driver)
+        # Explicit mode, not DEVICE_ATTR_RW: the mute daemon may reach this
+        # through group ownership rather than as root, and 0644 would refuse it.
+        self.assertIn(
+            "static DEVICE_ATTR(mute_lamp, 0664, mute_lamp_show, mute_lamp_store);",
+            self.driver)
+        self.assertNotIn("DEVICE_ATTR_RW(mute_lamp)", self.driver)
         self.assertIn("&dev_attr_mute_lamp.attr,", self.driver)
         self.assertIn("mute_lamp", KCONFIG.read_text())
 

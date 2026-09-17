@@ -511,7 +511,12 @@ out:
 	return ret;
 }
 
-static DEVICE_ATTR_RW(mute_lamp);
+/*
+ * Group-writable like the driver's other controls: the mute daemon may hold
+ * access through group ownership rather than running as root, and a 0644
+ * attribute would then refuse the write that lights the lamp.
+ */
+static DEVICE_ATTR(mute_lamp, 0664, mute_lamp_show, mute_lamp_store);
 
 static struct attribute *amz_privacy_attrs[] = {
 	&dev_attr_privacy_trigger.attr,
