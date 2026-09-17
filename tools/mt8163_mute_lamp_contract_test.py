@@ -54,6 +54,11 @@ class MuteLampContractTests(unittest.TestCase):
         self.assertIn("if (priv->disabled) {", store)
         self.assertIn("if (priv->cur_priv && !on) {", store)
         self.assertEqual(store.count("ret = -EBUSY;"), 2)
+        # Refusing the physical clear must still record the software unmute, or
+        # the latch release would re-assert a lamp nobody asked for.
+        latched = store[store.index("if (priv->cur_priv && !on) {"):]
+        latched = latched[:latched.index("-EBUSY")]
+        self.assertIn("priv->mute_lamp = false;", latched)
 
     def test_latch_release_reasserts_a_software_mute_lamp(self) -> None:
         trigger = body_of(self.driver, "static int __amz_priv_trigger(",

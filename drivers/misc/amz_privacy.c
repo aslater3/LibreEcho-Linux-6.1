@@ -525,6 +525,13 @@ static ssize_t mute_lamp_store(struct device *dev,
 		goto out;
 	}
 	if (priv->cur_priv && !on) {
+		/*
+		 * The button owns the lamp while its latch is engaged, so the physical
+		 * deassertion is deferred -- but the request itself is recorded, or the
+		 * release would re-assert a lamp for a software mute that has since been
+		 * turned off, leaving the lamp lit and the microphones cut.
+		 */
+		priv->mute_lamp = false;
 		ret = -EBUSY;
 		goto out;
 	}
