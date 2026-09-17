@@ -52,6 +52,11 @@ class MuteLampContractTests(unittest.TestCase):
         store = body_of(self.driver, "static ssize_t mute_lamp_store(",
                         "\n}\n")
         self.assertIn("if (priv->disabled) {", store)
+        # A change during the shutdown dialog is refused physically but still
+        # recorded, so exiting the dialog lights the lamp for the current state.
+        disabled = store[store.index("if (priv->disabled) {"):]
+        disabled = disabled[:disabled.index("-EBUSY")]
+        self.assertIn("priv->mute_lamp = !!on;", disabled)
         self.assertIn("if (priv->cur_priv && !on) {", store)
         self.assertEqual(store.count("ret = -EBUSY;"), 2)
         # Refusing the physical clear must still record the software unmute, or

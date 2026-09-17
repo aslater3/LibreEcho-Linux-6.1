@@ -535,6 +535,12 @@ static ssize_t mute_lamp_store(struct device *dev,
 		goto out;
 	}
 	if (priv->disabled) {
+		/*
+		 * The shutdown dialog owns the outputs, so the physical change is
+		 * refused -- but the request itself is recorded, or the exit path would
+		 * light the lamp for a mute state that has since changed.
+		 */
+		priv->mute_lamp = !!on;
 		ret = -EBUSY;
 		goto out;
 	}
