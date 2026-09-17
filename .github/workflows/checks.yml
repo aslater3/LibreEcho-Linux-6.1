@@ -126,6 +126,9 @@ jobs:
       - name: Run pstore ramoops contract
         run: python3 tools/mt8163_pstore_ramoops_contract_test.py
 
+      - name: Run procfs map_files NULL mm contract
+        run: python3 fs/proc/test_proc_map_files_null_mm_contract.py
+
       - name: Configure and build kernel
         shell: bash
         run: |
