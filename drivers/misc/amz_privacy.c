@@ -434,6 +434,14 @@ static ssize_t shutdown_dialog_state_store(struct device *dev,
 	mutex_lock(&amz_privacy_lock);
 	priv->shutdown_dialog_status = value;
 	if (value == 1) {
+		/*
+		 * Drop the software lamp request first: this call deasserts the
+		 * outputs, and the restoration in __amz_priv_trigger() would otherwise
+		 * drive them straight back on -- with `disabled` then refusing the one
+		 * write that could clear it, leaving the lamp and the microphone cut on
+		 * for the whole of shutdown mode.
+		 */
+		priv->mute_lamp = false;
 		__amz_priv_trigger(priv, 0);
 		priv->disabled = true;
 	} else {
@@ -479,6 +487,11 @@ static ssize_t mute_lamp_show(struct device *dev,
 {
 	struct amz_privacy *priv = dev_get_drvdata(dev);
 
+	/* Not supported on a latched board: a value here would claim a lamp this
+	   control cannot drive. */
+	if (priv->hw_latch)
+		return -EOPNOTSUPP;
+
 	return sysfs_emit(buf, "%d\n", priv->mute_lamp ? 1 : 0);
 }
 
@@ -495,6 +508,18 @@ static ssize_t mute_lamp_store(struct device *dev,
 		return ret;
 
 	mutex_lock(&amz_privacy_lock);
+	if (priv->hw_latch) {
+		/*
+		 * Boards with the hardware latch run privacy as a handshake: assert,
+		 * wait for the acknowledgement, and deassert. This control performs
+		 * none of that, so driving the request line here could enter or hold
+		 * hardware privacy while cur_priv stayed 0 and the callbacks were never
+		 * told, and a release would not unwind it. The lamp control is for
+		 * boards whose privacy indication is a plain output -- Radar-Puffin.
+		 */
+		ret = -EOPNOTSUPP;
+		goto out;
+	}
 	if (priv->disabled) {
 		ret = -EBUSY;
 		goto out;

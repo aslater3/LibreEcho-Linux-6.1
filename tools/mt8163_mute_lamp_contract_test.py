@@ -61,6 +61,26 @@ class MuteLampContractTests(unittest.TestCase):
         self.assertIn("if (!priv->cur_priv && priv->mute_lamp)", trigger)
         self.assertIn("amz_privacy_set_mute_lamp(priv, 1);", trigger)
 
+    def test_latched_boards_are_refused(self) -> None:
+        # A latched board runs privacy as an assert/acknowledge/ deassert
+        # handshake this control does not perform, so it must not drive it.
+        store = body_of(self.driver, "static ssize_t mute_lamp_store(",
+                        "\n}\n")
+        self.assertIn("if (priv->hw_latch) {", store)
+        self.assertIn("ret = -EOPNOTSUPP;", store)
+        show = body_of(self.driver, "static ssize_t mute_lamp_show(",
+                       "\n}\n")
+        self.assertIn("if (priv->hw_latch)", show)
+        self.assertIn("-EOPNOTSUPP", show)
+
+    def test_shutdown_mode_does_not_restore_the_lamp(self) -> None:
+        shutdown = body_of(self.driver, "static ssize_t shutdown_dialog_state_store(",
+                           "\n}\n")
+        self.assertLess(shutdown.index("priv->mute_lamp = false;"),
+                        shutdown.index("__amz_priv_trigger(priv, 0);"),
+                        "the lamp request must be dropped before the trigger "
+                        "that deasserts the outputs")
+
     def test_privacy_trigger_still_cannot_leave_privacy(self) -> None:
         store = body_of(self.driver, "static ssize_t privacy_trigger_store(",
                         "\n}\n")
