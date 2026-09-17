@@ -35,6 +35,8 @@ struct amz_privacy {
 	bool disabled;
 	bool hw_latch;
 	bool input_handler_registered;
+	bool mute_lamp;
+	bool suppress_lamp_restore;
 	int privacy_mode_status;
 	int shutdown_dialog_status;
 	int cur_priv;
@@ -58,6 +60,30 @@ static void amz_privacy_set_bright_state(struct amz_privacy *priv, int on)
 {
 	if (priv->bright_state_gpio)
 		gpiod_set_value_cansleep(priv->bright_state_gpio, on);
+}
+
+/*
+ * The mute indication.
+ *
+ * Radar-Puffin has no lamp line of its own: the vendor mute-gpio is absent from
+ * this board's device tree and this is the line that replaced it, so the lamp
+ * the physical button lights is what a privacy transition drives. A software
+ * mute can therefore only light that lamp by driving the same pair of lines, and
+ * that is what this does on purpose -- a mute from the web UI lights the lamp
+ * the button lights, and the microphones are cut in hardware while it is on.
+ *
+ * What it deliberately does not do is enter the latch: the state machine, the
+ * debounce timer and the registered callbacks are untouched, so the physical
+ * button keeps its authority and, unlike privacy_trigger, this can clear what it
+ * set. While the latch is engaged the button owns the lamp and writes here are
+ * refused, so software cannot put out a lamp the user asked for physically.
+ */
+static void amz_privacy_set_mute_lamp(struct amz_privacy *priv, int on)
+{
+	on &= 1;
+	gpiod_set_raw_value_cansleep(priv->privacy_gpio, on);
+	amz_privacy_set_bright_state(priv, on);
+	priv->mute_lamp = !!on;
 }
 
 static void amz_privacy_call_callbacks(struct amz_privacy *priv, int on)
@@ -107,21 +133,34 @@ static int amz_privacy_assert_latch(struct amz_privacy *priv)
 static int __amz_priv_trigger(struct amz_privacy *priv, int on)
 {
 	int ret;
+	int keep;
 
 	if (priv->disabled)
 		return 0;
 
 	on &= 1;
 
-	/* Preserve gpio_set_value() electrical semantics from the old driver. */
-	gpiod_set_raw_value_cansleep(priv->privacy_gpio, on);
-
 	/*
-	 * Radar-Puffin names the old inverse mute output "bright-state".
-	 * Descriptor polarity turns logical privacy-on into its active-low
-	 * electrical level.
+	 * The indication line is shared with a software mute that is still on, and
+	 * releasing the latch must not glitch it -- and the microphone cut with it
+	 * -- off and straight back on through the sleepable GPIO calls. The mute
+	 * request therefore decides the line, except when the caller is suppressing
+	 * the request on purpose (entering the shutdown dialog): then the caller's
+	 * level is the one to drive.
 	 */
-	amz_privacy_set_bright_state(priv, on);
+	keep = (!on && priv->mute_lamp && !priv->suppress_lamp_restore);
+	if (!keep) {
+		/* Preserve gpio_set_value() electrical semantics from the old driver. */
+		gpiod_set_raw_value_cansleep(priv->privacy_gpio, on);
+
+		/*
+		 * Radar-Puffin names the old inverse mute output "bright-state".
+		 * Descriptor polarity turns logical privacy-on into its active-low
+		 * electrical level.
+		 */
+		amz_privacy_set_bright_state(priv, on);
+	}
+
 	amz_privacy_call_callbacks(priv, on);
 
 	if (on) {
@@ -406,10 +445,21 @@ static ssize_t shutdown_dialog_state_store(struct device *dev,
 	mutex_lock(&amz_privacy_lock);
 	priv->shutdown_dialog_status = value;
 	if (value == 1) {
+		/*
+		 * The outputs are deasserted on purpose here, and the software mute
+		 * request is left alone: suppressing it for this call keeps the
+		 * deassertion from being undone, and keeping it means cancelling the
+		 * dialog can put the lamp back instead of losing the mute.
+		 */
+		priv->suppress_lamp_restore = true;
 		__amz_priv_trigger(priv, 0);
+		priv->suppress_lamp_restore = false;
 		priv->disabled = true;
 	} else {
 		priv->disabled = false;
+		/* The software mute outlived the dialog: light its lamp again. */
+		if (priv->mute_lamp && !priv->cur_priv)
+			amz_privacy_set_mute_lamp(priv, 1);
 	}
 	mutex_unlock(&amz_privacy_lock);
 
@@ -441,12 +491,92 @@ static DEVICE_ATTR(shutdown_dialog_state, 0664,
 		   shutdown_dialog_state_show, shutdown_dialog_state_store);
 static DEVICE_ATTR(power_button_state, 0664, power_button_state_show, NULL);
 
+/*
+ * The only userspace control over the mute indication, and the only way a
+ * software mute can light the button's lamp. 1 lights it, 0 clears it; while the
+ * hardware latch is engaged the button owns the lamp and 0 is refused.
+ */
+static ssize_t mute_lamp_show(struct device *dev,
+			      struct device_attribute *attr, char *buf)
+{
+	struct amz_privacy *priv = dev_get_drvdata(dev);
+
+	/* Not supported on a latched board: a value here would claim a lamp this
+	   control cannot drive. */
+	if (priv->hw_latch)
+		return -EOPNOTSUPP;
+
+	return sysfs_emit(buf, "%d\n", priv->mute_lamp ? 1 : 0);
+}
+
+static ssize_t mute_lamp_store(struct device *dev,
+			       struct device_attribute *attr,
+			       const char *buf, size_t count)
+{
+	struct amz_privacy *priv = dev_get_drvdata(dev);
+	bool on;
+	int ret;
+
+	ret = kstrtobool(buf, &on);
+	if (ret)
+		return ret;
+
+	mutex_lock(&amz_privacy_lock);
+	if (priv->hw_latch) {
+		/*
+		 * Boards with the hardware latch run privacy as a handshake: assert,
+		 * wait for the acknowledgement, and deassert. This control performs
+		 * none of that, so driving the request line here could enter or hold
+		 * hardware privacy while cur_priv stayed 0 and the callbacks were never
+		 * told, and a release would not unwind it. The lamp control is for
+		 * boards whose privacy indication is a plain output -- Radar-Puffin.
+		 */
+		ret = -EOPNOTSUPP;
+		goto out;
+	}
+	if (priv->disabled) {
+		/*
+		 * The shutdown dialog owns the outputs, so the physical change is
+		 * refused -- but the request itself is recorded, or the exit path would
+		 * light the lamp for a mute state that has since changed.
+		 */
+		priv->mute_lamp = !!on;
+		ret = -EBUSY;
+		goto out;
+	}
+	if (priv->cur_priv && !on) {
+		/*
+		 * The button owns the lamp while its latch is engaged, so the physical
+		 * deassertion is deferred -- but the request itself is recorded, or the
+		 * release would re-assert a lamp for a software mute that has since been
+		 * turned off, leaving the lamp lit and the microphones cut.
+		 */
+		priv->mute_lamp = false;
+		ret = -EBUSY;
+		goto out;
+	}
+	amz_privacy_set_mute_lamp(priv, on);
+	amz_privacy_notify(priv, "mute_lamp");
+	ret = count;
+out:
+	mutex_unlock(&amz_privacy_lock);
+	return ret;
+}
+
+/*
+ * Group-writable like the driver's other controls: the mute daemon may hold
+ * access through group ownership rather than running as root, and a 0644
+ * attribute would then refuse the write that lights the lamp.
+ */
+static DEVICE_ATTR(mute_lamp, 0664, mute_lamp_show, mute_lamp_store);
+
 static struct attribute *amz_privacy_attrs[] = {
 	&dev_attr_privacy_trigger.attr,
 	&dev_attr_privacy_state.attr,
 	&dev_attr_privacy_timer_on.attr,
 	&dev_attr_shutdown_dialog_state.attr,
 	&dev_attr_power_button_state.attr,
+	&dev_attr_mute_lamp.attr,
 	NULL,
 };
 
