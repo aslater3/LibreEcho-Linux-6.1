@@ -504,7 +504,9 @@ config AMZ_PRIVACY
 	  Enable the Amazon hardware privacy GPIO control used by
 	  Radar-Puffin devices. The driver retains the vendor sysfs
 	  interface for privacy state, trigger, timer, shutdown-dialog,
-	  and power-button state.
+	  and power-button state, and adds mute_lamp: a control that
+	  lights the mute button's lamp from a software mute without
+	  entering the privacy latch.
 
 source "drivers/misc/c2port/Kconfig"
 source "drivers/misc/eeprom/Kconfig"

@@ -123,6 +123,9 @@ jobs:
       - name: Run pstore ramoops contract
         run: python3 tools/mt8163_pstore_ramoops_contract_test.py
 
+      - name: Run Radar-Puffin mute lamp contract
+        run: python3 tools/mt8163_mute_lamp_contract_test.py
+
       - name: Configure and build kernel
         shell: bash
         run: |

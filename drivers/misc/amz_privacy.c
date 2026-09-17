@@ -35,6 +35,7 @@ struct amz_privacy {
 	bool disabled;
 	bool hw_latch;
 	bool input_handler_registered;
+	bool mute_lamp;
 	int privacy_mode_status;
 	int shutdown_dialog_status;
 	int cur_priv;
@@ -58,6 +59,30 @@ static void amz_privacy_set_bright_state(struct amz_privacy *priv, int on)
 {
 	if (priv->bright_state_gpio)
 		gpiod_set_value_cansleep(priv->bright_state_gpio, on);
+}
+
+/*
+ * The mute indication.
+ *
+ * Radar-Puffin has no lamp line of its own: the vendor mute-gpio is absent from
+ * this board's device tree and this is the line that replaced it, so the lamp
+ * the physical button lights is what a privacy transition drives. A software
+ * mute can therefore only light that lamp by driving the same pair of lines, and
+ * that is what this does on purpose -- a mute from the web UI lights the lamp
+ * the button lights, and the microphones are cut in hardware while it is on.
+ *
+ * What it deliberately does not do is enter the latch: the state machine, the
+ * debounce timer and the registered callbacks are untouched, so the physical
+ * button keeps its authority and, unlike privacy_trigger, this can clear what it
+ * set. While the latch is engaged the button owns the lamp and writes here are
+ * refused, so software cannot put out a lamp the user asked for physically.
+ */
+static void amz_privacy_set_mute_lamp(struct amz_privacy *priv, int on)
+{
+	on &= 1;
+	gpiod_set_raw_value_cansleep(priv->privacy_gpio, on);
+	amz_privacy_set_bright_state(priv, on);
+	priv->mute_lamp = !!on;
 }
 
 static void amz_privacy_call_callbacks(struct amz_privacy *priv, int on)
@@ -132,6 +157,9 @@ static int __amz_priv_trigger(struct amz_privacy *priv, int on)
 
 	/* State changes only after the hardware-latch assertion completes. */
 	priv->cur_priv = on;
+	/* Releasing the latch must not put out a lamp a software mute set. */
+	if (!priv->cur_priv && priv->mute_lamp)
+		amz_privacy_set_mute_lamp(priv, 1);
 	amz_privacy_notify(priv, "privacy_state");
 
 	return 0;
@@ -441,12 +469,57 @@ static DEVICE_ATTR(shutdown_dialog_state, 0664,
 		   shutdown_dialog_state_show, shutdown_dialog_state_store);
 static DEVICE_ATTR(power_button_state, 0664, power_button_state_show, NULL);
 
+/*
+ * The only userspace control over the mute indication, and the only way a
+ * software mute can light the button's lamp. 1 lights it, 0 clears it; while the
+ * hardware latch is engaged the button owns the lamp and 0 is refused.
+ */
+static ssize_t mute_lamp_show(struct device *dev,
+			      struct device_attribute *attr, char *buf)
+{
+	struct amz_privacy *priv = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%d\n", priv->mute_lamp ? 1 : 0);
+}
+
+static ssize_t mute_lamp_store(struct device *dev,
+			       struct device_attribute *attr,
+			       const char *buf, size_t count)
+{
+	struct amz_privacy *priv = dev_get_drvdata(dev);
+	bool on;
+	int ret;
+
+	ret = kstrtobool(buf, &on);
+	if (ret)
+		return ret;
+
+	mutex_lock(&amz_privacy_lock);
+	if (priv->disabled) {
+		ret = -EBUSY;
+		goto out;
+	}
+	if (priv->cur_priv && !on) {
+		ret = -EBUSY;
+		goto out;
+	}
+	amz_privacy_set_mute_lamp(priv, on);
+	amz_privacy_notify(priv, "mute_lamp");
+	ret = count;
+out:
+	mutex_unlock(&amz_privacy_lock);
+	return ret;
+}
+
+static DEVICE_ATTR_RW(mute_lamp);
+
 static struct attribute *amz_privacy_attrs[] = {
 	&dev_attr_privacy_trigger.attr,
 	&dev_attr_privacy_state.attr,
 	&dev_attr_privacy_timer_on.attr,
 	&dev_attr_shutdown_dialog_state.attr,
 	&dev_attr_power_button_state.attr,
+	&dev_attr_mute_lamp.attr,
 	NULL,
 };
 
