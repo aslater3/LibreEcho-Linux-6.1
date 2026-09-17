@@ -103,6 +103,9 @@ jobs:
       - name: Run MT8163 MCLK pinctrl contract
         run: python3 sound/soc/mediatek/mt8163/test_mt8163_mclk_pinctrl_contract.py
 
+      - name: Run MT8163 AFE period IRQ atomic contract
+        run: python3 sound/soc/mediatek/mt8163/test_mt8163_afe_irq_atomic_contract.py
+
       - name: Run Radar-Puffin PCM volume preservation contract
         run: python3 sound/soc/mediatek/mt8163/test_radar_puffin_volume_preservation.py
 
