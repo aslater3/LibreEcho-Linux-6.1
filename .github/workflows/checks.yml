@@ -17,7 +17,7 @@ concurrency:
 jobs:
   docs_gate:
     name: Documentation-only change gate
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     outputs:
       run_build: ${{ steps.detect.outputs.run_build }}
     steps:
@@ -68,7 +68,7 @@ jobs:
     name: ARM32 kernel build and regression checks
     needs: docs_gate
     if: needs.docs_gate.outputs.run_build == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 90
     steps:
       - name: Check out Linux source
