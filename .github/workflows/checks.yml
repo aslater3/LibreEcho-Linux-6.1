@@ -64,12 +64,37 @@ jobs:
           echo "gate: reason=$reason changed_files=$file_count run_build=$run_build"
           echo "run_build=$run_build" >> "$GITHUB_OUTPUT"
 
-  arm32_kernel:
-    name: ARM32 kernel build and regression checks
+  target_table:
+    name: Validate targets and plan build matrix
     needs: docs_gate
     if: needs.docs_gate.outputs.run_build == 'true'
     runs-on: ubuntu-24.04
+    outputs:
+      build_matrix: ${{ steps.targets.outputs.build_matrix }}
+      publish_matrix: ${{ steps.targets.outputs.publish_matrix }}
+    steps:
+      - name: Check out Linux source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - name: Run target-table regression tests
+        run: python3 -B libreecho/test_targets.py
+      - name: Validate sources and emit deduplicated matrices
+        id: targets
+        run: python3 -B libreecho/validate_targets.py --github-output "$GITHUB_OUTPUT"
+
+  arm32_kernel:
+    name: ARM32 kernel build and regression checks (${{ matrix.target }})
+    needs: [docs_gate, target_table]
+    if: needs.docs_gate.outputs.run_build == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.target_table.outputs.build_matrix) }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
+    env:
+      KERNEL_DEFCONFIG: ${{ matrix.defconfig }}
+      KERNEL_DTB: ${{ matrix.dtb }}
     steps:
       - name: Check out Linux source
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
@@ -138,13 +163,13 @@ jobs:
           set -euo pipefail
           out="$RUNNER_TEMP/kernel-out"
           make O="$out" ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- \
-            LD=arm-linux-gnueabihf-ld.bfd mt8163_arm32_defconfig
+            LD=arm-linux-gnueabihf-ld.bfd "$KERNEL_DEFCONFIG"
           make O="$out" ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- \
             LD=arm-linux-gnueabihf-ld.bfd olddefconfig
           make -j2 O="$out" ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- \
             LD=arm-linux-gnueabihf-ld.bfd zImage dtbs
           test -s "$out/arch/arm/boot/zImage"
-          test -s "$out/arch/arm/boot/dts/libreecho-radar-puffin.dtb"
+          test -s "$out/arch/arm/boot/dts/$KERNEL_DTB"
           test -s "$out/System.map"
           grep -qx 'CONFIG_CFG80211_WEXT=y' "$out/.config"
           # The MUSB role is a Kconfig choice, so it can be re-resolved by
@@ -159,12 +184,87 @@ jobs:
       - name: Upload kernel build outputs
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: libreecho-linux-arm32-${{ github.sha }}
+          name: libreecho-linux-arm32-${{ github.sha }}-${{ matrix.target }}
           if-no-files-found: error
           include-hidden-files: true
           retention-days: 14
           path: |
             ${{ runner.temp }}/kernel-out/arch/arm/boot/zImage
-            ${{ runner.temp }}/kernel-out/arch/arm/boot/dts/libreecho-radar-puffin.dtb
+            ${{ runner.temp }}/kernel-out/arch/arm/boot/dts/${{ matrix.dtb }}
             ${{ runner.temp }}/kernel-out/System.map
             ${{ runner.temp }}/kernel-out/.config
+
+  target_artifacts:
+    name: Publish kernel artifacts (${{ matrix.target }})
+    needs: [target_table, arm32_kernel]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.target_table.outputs.publish_matrix) }}
+    runs-on: ubuntu-24.04
+    env:
+      KERNEL_DTB: ${{ matrix.dtb }}
+    steps:
+      # Identical tuples download the same immutable build artifact. Publication
+      # does not rebuild or alter kernel bytes; a divergent tuple gets a new lane.
+      - name: Download this target's canonical build
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: libreecho-linux-arm32-${{ github.sha }}-${{ matrix.build_target }}
+          path: ${{ runner.temp }}/kernel-artifacts
+
+      - name: Require complete build outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/kernel-artifacts"
+          test -s "$out/arch/arm/boot/zImage"
+          test -s "$out/arch/arm/boot/dts/$KERNEL_DTB"
+          test -s "$out/System.map"
+          test -s "$out/.config"
+
+      - name: Upload target kernel image
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: libreecho-kernel-${{ matrix.target }}-zImage
+          if-no-files-found: error
+          retention-days: 14
+          path: ${{ runner.temp }}/kernel-artifacts/arch/arm/boot/zImage
+
+      - name: Upload target DTB
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: libreecho-kernel-${{ matrix.target }}-dtb
+          if-no-files-found: error
+          retention-days: 14
+          path: ${{ runner.temp }}/kernel-artifacts/arch/arm/boot/dts/${{ matrix.dtb }}
+
+      - name: Upload target symbol map
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: libreecho-kernel-${{ matrix.target }}-System.map
+          if-no-files-found: error
+          retention-days: 14
+          path: ${{ runner.temp }}/kernel-artifacts/System.map
+
+      - name: Upload target resolved configuration
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: libreecho-kernel-${{ matrix.target }}-config
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 14
+          path: ${{ runner.temp }}/kernel-artifacts/.config
+
+      - name: Retain legacy Radar artifact bundle
+        if: matrix.target == 'radar_puffin'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: libreecho-linux-arm32-${{ github.sha }}
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 14
+          path: |
+            ${{ runner.temp }}/kernel-artifacts/arch/arm/boot/zImage
+            ${{ runner.temp }}/kernel-artifacts/arch/arm/boot/dts/${{ matrix.dtb }}
+            ${{ runner.temp }}/kernel-artifacts/System.map
+            ${{ runner.temp }}/kernel-artifacts/.config
