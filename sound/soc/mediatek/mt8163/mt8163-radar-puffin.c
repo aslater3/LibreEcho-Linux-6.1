@@ -270,6 +270,7 @@ struct radar_card {
 	unsigned int right_only;
 	unsigned int hd_output;
 	unsigned int ignore_ramp;
+	unsigned int speaker_profile;
 	bool speaker_mclk_enabled;
 	bool speaker_release_pending;
 	unsigned int speaker_release_retries;
@@ -278,6 +279,23 @@ struct radar_card {
 
 static const char * const radar_on_off[] = { "Off", "On" };
 static SOC_ENUM_SINGLE_EXT_DECL(radar_on_off_enum, radar_on_off);
+
+/*
+ * Codec DAC biquad profile loaded on every speaker prepare.  "Radar" is the
+ * stock radar_puffin two-way crossover (default, unchanged).  "Flat" loads
+ * unity biquads for one-driver boards such as the Echo Dot (biscuit), whose
+ * stock audio_device.xml programs identity coefficients: the Radar crossover
+ * low-passes the Dot's single speaker channel and removes everything above
+ * ~3 kHz.  The kernel cannot tell the boards apart (shared DT), so the image's
+ * audio engine selects the profile before opening the speaker PCM.
+ */
+enum radar_speaker_profile {
+	RADAR_SPEAKER_PROFILE_RADAR = 0,
+	RADAR_SPEAKER_PROFILE_FLAT = 1,
+};
+static const char * const radar_speaker_profiles[] = { "Radar", "Flat" };
+static SOC_ENUM_SINGLE_EXT_DECL(radar_speaker_profile_enum,
+				radar_speaker_profiles);
 
 static const char * const radar_channel_config[] = {
 	"Stereo", "MonoLeft", "MonoRight"
@@ -364,6 +382,29 @@ RADAR_STATE_CONTROL_FUNCS(linein, linein_adc)
 RADAR_STATE_CONTROL_FUNCS(amp_fault, amp_fault_enable)
 RADAR_STATE_CONTROL_FUNCS(hd_output, hd_output)
 RADAR_STATE_CONTROL_FUNCS(ignore_ramp, ignore_ramp)
+
+static int radar_speaker_profile_get(struct snd_kcontrol *kcontrol,
+				     struct snd_ctl_elem_value *value)
+{
+	value->value.enumerated.item[0] =
+		radar_kcontrol_priv(kcontrol)->speaker_profile;
+	return 0;
+}
+
+/* Takes effect at the next speaker prepare, which rewrites the biquads. */
+static int radar_speaker_profile_put(struct snd_kcontrol *kcontrol,
+				     struct snd_ctl_elem_value *value)
+{
+	struct radar_card *priv = radar_kcontrol_priv(kcontrol);
+	unsigned int requested = value->value.enumerated.item[0];
+
+	if (requested >= ARRAY_SIZE(radar_speaker_profiles))
+		return -EINVAL;
+	if (priv->speaker_profile == requested)
+		return 0;
+	priv->speaker_profile = requested;
+	return 1;
+}
 
 static int radar_right_only_get(struct snd_kcontrol *kcontrol,
 				struct snd_ctl_elem_value *value)
@@ -500,6 +541,8 @@ static const struct snd_kcontrol_new radar_controls[] = {
 		     radar_right_only_get, radar_right_only_put),
 	SOC_ENUM_EXT("Ignore Ramp Up", radar_on_off_enum,
 		     radar_ignore_ramp_get, radar_ignore_ramp_put),
+	SOC_ENUM_EXT("Speaker Codec Profile", radar_speaker_profile_enum,
+		     radar_speaker_profile_get, radar_speaker_profile_put),
 };
 
 static int radar_speaker_init(struct snd_soc_pcm_runtime *rtd)
@@ -742,15 +785,44 @@ static void radar_speaker_shutdown(struct snd_pcm_substream *substream)
 			ret);
 }
 
-static int radar_speaker_apply_profile(struct snd_soc_component *component)
+/*
+ * Unity value for one profile register.  DAC buffer-A biquads are five
+ * 24-bit coefficients (N0 N1 N2 D1 D2) in 4-register slots, 20 registers per
+ * biquad: left from page 44 reg 12, right from page 45 reg 20.  Unity is
+ * N0 = 0x7fffff with every other coefficient zero.  Registers outside those
+ * two biquad blocks (page 46) keep the stock profile value.
+ */
+static unsigned int radar_flat_profile_value(unsigned int reg,
+					     unsigned int stock)
+{
+	static const unsigned char n0[3] = { 0x7f, 0xff, 0xff };
+	unsigned int page = reg / 128, r = reg % 128, base, off;
+
+	if (page == 44)
+		base = 12;
+	else if (page == 45)
+		base = 20;
+	else
+		return stock;
+	if (r < base)
+		return stock;
+	off = (r - base) % 20;
+	return off < 3 ? n0[off] : 0;
+}
+
+static int radar_speaker_apply_profile(struct snd_soc_component *component,
+				       unsigned int profile)
 {
 	size_t i;
 	int ret;
 
 	for (i = 0; i < ARRAY_SIZE(radar_puffin_ext_speaker_profile); i++) {
-		ret = snd_soc_component_write(
-			component, radar_puffin_ext_speaker_profile[i].reg,
-			radar_puffin_ext_speaker_profile[i].def);
+		unsigned int reg = radar_puffin_ext_speaker_profile[i].reg;
+		unsigned int val = radar_puffin_ext_speaker_profile[i].def;
+
+		if (profile == RADAR_SPEAKER_PROFILE_FLAT)
+			val = radar_flat_profile_value(reg, val);
+		ret = snd_soc_component_write(component, reg, val);
 		if (ret < 0) {
 			dev_err(component->dev,
 				"Puffin speaker profile write %zu failed: %d\n",
@@ -845,7 +917,7 @@ static int radar_speaker_prepare(struct snd_pcm_substream *substream)
 				      RADAR_PUFFIN_DAC_PROCESSING_BLOCK);
 	if (ret < 0)
 		goto fail;
-	ret = radar_speaker_apply_profile(component);
+	ret = radar_speaker_apply_profile(component, priv->speaker_profile);
 	if (ret)
 		goto fail;
 	/*
