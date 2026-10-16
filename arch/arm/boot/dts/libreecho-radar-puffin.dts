@@ -216,28 +216,109 @@
 
 	thermal-zones {
 		cpu-thermal {
-			polling-delay-passive = <0x3e8>;
-			polling-delay = <0x3e8>;
+			/*
+			 * mtk_thermal implements only .get_temp -- it has no
+			 * .set_trips -- so the interrupt this sensor declares is
+			 * never used to signal a trip crossing and polling is the
+			 * only path by which a trip is ever noticed.
+			 *
+			 * That makes this number the entire reaction time. The
+			 * step_wise governor moves exactly one cooling state per
+			 * poll, and this CPU has seven OPPs, so at the original
+			 * 1000 ms it took six seconds to walk from 1.3 GHz down to
+			 * 600 MHz -- and the same six seconds to come back up
+			 * afterwards. On a device whose whole job is answering
+			 * within a second, that recovery cost is as important as
+			 * the protection: a burst of heat left the CPU slow for
+			 * seconds after the heat was gone. At 250 ms the range
+			 * takes 1.5 s in both directions.
+			 *
+			 * Only the passive delay is shortened. Below every trip
+			 * the zone still polls once a second, which is where the
+			 * device spends nearly all of its time.
+			 */
+			polling-delay-passive = <250>;
+			polling-delay = <1000>;
 			thermal-sensors = <&thermal>;
 
+			/*
+			 * Temperatures are in millicelsius and written in decimal
+			 * on purpose. Both trips were hex literals that disagreed
+			 * with the comments next to them -- 0x14ba8 is 84.904 C,
+			 * not the 85 C it claimed, and 0x1c908 is 117 C, not the
+			 * 115 C it claimed. In both cases the value is right and
+			 * the comment was wrong. Decimal makes the number legible
+			 * at a glance so the two cannot drift apart again.
+			 */
+			/*
+			 * The power an enclosure this size can shed while the die
+			 * sits at the target trip. Four cores at 1.3 GHz draw about
+			 * 2311 mW by the coefficient above, and this part settles at
+			 * 81.5 C running exactly that, so the sustainable figure is a
+			 * little under it. Needs confirming on hardware.
+			 */
+			sustainable-power = <2000>;
+
+			/*
+			 * Mirrors mainline's MediaTek zones: a threshold where
+			 * control begins and a target it regulates toward.
+			 *
+			 * 68 C is what mainline uses for both mt8173 and mt8183, and
+			 * Amazon's own ladder for this SoC starts one degree below
+			 * it at 67 C. Three independent sources agree, which is why
+			 * it is here rather than a number of my own.
+			 *
+			 * It is close to where this device idles -- 66.7 C measured,
+			 * peaks of 71.8 C -- and that is exactly why the governor
+			 * matters. power_allocator treats the threshold as "start
+			 * budgeting" and does not touch the clock while the die is
+			 * below target, so idling astride it costs nothing. Under
+			 * step_wise a mapped trip here would cap the clock at idle,
+			 * which is why nothing is mapped to it.
+			 */
 			trips {
-				/* Start throttling CPUfreq at 85 C. */
-				cpu_passive: cpu-passive {
-					temperature = <0x14ba8>;
-					hysteresis = <0x7d0>;
+				threshold: trip-point0 {
+					temperature = <68000>;
+					hysteresis = <2000>;
 					type = "passive";
 				};
-				/* Emergency power-off at 115 C. */
+
+				/*
+				 * The temperature to hold. 80 C is mainline's
+				 * mt8183 figure and sits just under the 81.5 C this
+				 * board reaches on sustained four-core load, so it
+				 * is the first trip in this tree that will actually
+				 * engage: the old 85 C was never reached, and the
+				 * cooling state stayed at 0 for an entire
+				 * characterisation run.
+				 */
+				target: trip-point1 {
+					temperature = <80000>;
+					hysteresis = <2000>;
+					type = "passive";
+				};
+				/*
+				 * Emergency power-off, left at the vendor's value.
+				 *
+				 * This looked like a transcription slip -- 117 C
+				 * beside a comment reading 115 C, exactly one
+				 * hysteresis step apart. It is not. Amazon's own
+				 * thermal.conf for the same SoC gives its CPU zone
+				 * an emergency trip of exactly 117000, wired to
+				 * mtktscpu-sysrst, above a shutdown at 100000. The
+				 * value is inherited and deliberate; only the
+				 * comment beside it was ever wrong.
+				 */
 				cpu-critical {
-					temperature = <0x1c908>;
-					hysteresis = <0x7d0>;
+					temperature = <117000>;
+					hysteresis = <2000>;
 					type = "critical";
 				};
 			};
 
 			cooling-maps {
 				map0 {
-					trip = <&cpu_passive>;
+					trip = <&target>;
 					cooling-device = <&cpu0 0xffffffff 0xffffffff>,
 							 <&cpu1 0xffffffff 0xffffffff>,
 							 <&cpu2 0xffffffff 0xffffffff>,
@@ -811,34 +892,36 @@
 
 				pins_cmd_dat {
 					pinmux = <0x2602>;
-					slew-rate = <0x00>;
 					bias-pull-up = <0x00>;
 				};
 			};
 
 			drvvbus_init {
+				linux,phandle = <0x80>;
+				phandle = <0x80>;
 
 				pins_cmd_dat {
-					pinmux = <0x2302>;
-					slew-rate = <0x01>;
-					bias-pull-up = <0x00>;
+					pinmux = <0x2300>;
+					output-low;
 				};
 			};
 
 			drvvbus_low {
+				linux,phandle = <0x81>;
+				phandle = <0x81>;
 
 				pins_cmd_dat {
-					pinmux = <0x2302>;
-					slew-rate = <0x01>;
+					pinmux = <0x2300>;
 					output-low;
 				};
 			};
 
 			drvvbus_high {
+				linux,phandle = <0x82>;
+				phandle = <0x82>;
 
 				pins_cmd_dat {
-					pinmux = <0x2302>;
-					slew-rate = <0x01>;
+					pinmux = <0x2300>;
 					output-high;
 				};
 			};
@@ -1052,8 +1135,18 @@
 					mediatek,long-press-mode = <0x01>;
 					power-off-time-sec = <0x00>;
 
+					/*
+					 * This PMIC key is the microphone-mute button, not a power
+					 * button -- the board has no separate power button, and the
+					 * vendor keypad node says so itself with
+					 * mediatek,kpd-sw-pwrkey = <0x71> (KEY_MUTE). Declaring it
+					 * 0x74 (KEY_POWER) made every press arrive under a code
+					 * nothing handles, so mute did nothing and looked like dead
+					 * hardware. Measured: ten presses produced ten KEY_POWER
+					 * events and no other code.
+					 */
 					power {
-						linux,keycodes = <0x74>;
+						linux,keycodes = <0x71>;
 						wakeup-source;
 					};
 
@@ -1605,6 +1698,10 @@
 
 			lp55231@32 {
 				compatible = "ti,lp55231";
+				/* Not populated on radar_puffin: enabling this made the driver probe and
+				   fail with "device detection err: -6" (ENXIO, no ACK on the bus),
+				   so the chip is absent and cannot be the source of any button
+				   lamp. Left disabled so the boot does not log a failed probe. */
 				status = "disabled";
 				reg = <0x32>;
 				clock-mode = [00];
@@ -2087,8 +2184,8 @@
 			reg = <0x00 0x11200000 0x00 0x10000 0x00 0x11210000 0x00 0x10000>;
 			interrupts = <0x00 0x48 0x08>;
 			interrupt-names = "mc";
-			dr_mode = "peripheral";
-			mode = <0x02>;
+			dr_mode = "otg";
+			mode = <0x03>;
 			multipoint = <0x01>;
 			dyn_fifo = <0x01>;
 			soft_con = <0x01>;
@@ -2098,7 +2195,49 @@
 			clocks = <0x2d 0x02 0x05 0x17 0x05 0x07 0x05 0x08>;
 			clock-names = "usbpll\0usbmcu\0usb\0icusb";
 			vusb-supply = <0x2e>;
-			pinctrl-names = "iddig_irq_init";
+			/*
+			 * No drvvbus states on radar_puffin.
+			 *
+			 * They claim pinmux <0x2300> -- pin 35, GPIO -- and drive it
+			 * low. On this board pin 35 is not USB_DRVVBUS: it is the
+			 * enable line for the microphone array codecs,
+			 *
+			 *     tlv320aic3101@18 { enable-gpio = <&pio 0x23 0x00>; }
+			 *
+			 * so selecting drvvbus_init or drvvbus_low at probe held all
+			 * four mic codecs disabled. Every I2C write to them failed
+			 * with -EIO, the capture FPGA reported frames=0, and waked
+			 * exited on an empty stream -- the wake word simply stopped
+			 * working, with nothing in the USB logs to suggest why.
+			 *
+			 * This costs USB host storage, and that trade is deliberate.
+			 * Measured on hardware, varying only these states:
+			 *
+			 *   init  low   high  | mic    storage
+			 *   ------------------+----------------
+			 *   (states unwired)  | works  dead
+			 *   high  high  high  | works  dead
+			 *   high  low   high  | dead   dead
+			 *   low   low   high  | dead   works     <- the original
+			 *
+			 * Storage only ever works when pin 35 is low at probe, and the
+			 * codecs only survive when it is never low. One pin, two
+			 * consumers, opposite requirements at the same moment -- so on
+			 * this board they are mutually exclusive, and the microphone
+			 * wins because a smart speaker that cannot hear is not one.
+			 *
+			 * A steady high does not buy storage back: config two above has
+			 * the pin asserted throughout and the drive still does not
+			 * enumerate, so this is not a matter of the drive missing a
+			 * VBUS rise. Nor is it a measurement artefact -- every row was
+			 * sampled past the 60s boot gate with usb_role confirmed host.
+			 *
+			 * Getting both would need the codecs re-probed after the pin is
+			 * raised (unbind/rebind tlv320aic3101 once the drive is up),
+			 * which is untested. The driver already treats these states'
+			 * absence as "the port cannot source VBUS" and carries on.
+			 */
+			pinctrl-names = "default";
 			pinctrl-0 = <0x2f>;
 			iddig_gpio = <&pio 0x26 0x00>;
 			status = "okay";
@@ -3021,6 +3160,33 @@
 		bright-state-gpio = <&pio 0x58 0x01>;
 	};
 
+	/*
+	 * The action button, on KPCOL0. The vendor reaches it through
+	 * mediatek,mt8163-keypad as KEY_HELP (0x8a, the single non-zero entry
+	 * in its kpd-hw-init-map) and that controller has no driver here, so
+	 * the button emitted nothing at all until this node existed.
+	 *
+	 * Identified by counting, not by correlation: all three keypad pins
+	 * nothing else claims were declared with distinct codes, and KPCOL0
+	 * reported 18 times across a window of deliberate presses while KPROW0
+	 * and KPROW1 each fired exactly once during boot and never again.
+	 * Those two are floating; an earlier attempt that trusted one of their
+	 * boot fires wired the wrong pin and the button stayed dead.
+	 *
+	 * Its own node so that if this pin is ever claimed elsewhere it fails
+	 * to probe alone rather than taking the volume keys with it.
+	 */
+	action_key {
+		compatible = "gpio-keys";
+
+		action@36 {
+			label = "Action Key";
+			linux,code = <0x8a>;
+			gpios = <&pio 0x24 0x01>;
+			debounce-interval = <0x14>;
+		};
+	};
+
 	keys {
 		compatible = "gpio-keys";
 		autorepeat;
@@ -3074,6 +3240,7 @@
 
 &cpu0 {
 	operating-points-v2 = <&cpu_opp_table>;
+	dynamic-power-coefficient = <263>;
 	cpu-supply = <&mt6323_vproc_reg>;
 	clocks = <&apmixedsys 0x00>;
 	clock-names = "cpu";
@@ -3082,6 +3249,7 @@
 
 &cpu1 {
 	operating-points-v2 = <&cpu_opp_table>;
+	dynamic-power-coefficient = <263>;
 	cpu-supply = <&mt6323_vproc_reg>;
 	clocks = <&apmixedsys 0x00>;
 	clock-names = "cpu";
@@ -3090,6 +3258,7 @@
 
 &cpu2 {
 	operating-points-v2 = <&cpu_opp_table>;
+	dynamic-power-coefficient = <263>;
 	cpu-supply = <&mt6323_vproc_reg>;
 	clocks = <&apmixedsys 0x00>;
 	clock-names = "cpu";
@@ -3098,6 +3267,7 @@
 
 &cpu3 {
 	operating-points-v2 = <&cpu_opp_table>;
+	dynamic-power-coefficient = <263>;
 	cpu-supply = <&mt6323_vproc_reg>;
 	clocks = <&apmixedsys 0x00>;
 	clock-names = "cpu";

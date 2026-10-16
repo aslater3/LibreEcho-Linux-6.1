@@ -709,11 +709,21 @@ static int mt8163_afe_stop(struct mt8163_afe *afe)
 	return mt8163_afe_preserve_error(afe, ret, safe_ret, "stop");
 }
 
+/*
+ * The Radar-Puffin DAI links are registered nonatomic, so the PCM stream
+ * lock taken by snd_pcm_period_elapsed() is a mutex, not a spinlock.  Period
+ * completion therefore cannot run in the hard IRQ handler: doing so schedules
+ * inside interrupt context ("scheduling while atomic"), the handler returns
+ * with interrupts enabled, and the kernel panics with a fatal exception in
+ * interrupt.  Keep the primary handler to the register read/ack only and
+ * report the period from the threaded handler, which runs in process context
+ * where the nonatomic PCM lock is legal.  IRQF_ONESHOT holds the AFE line
+ * masked until the thread handler completes, so the primary handler can never
+ * re-enable interrupts or be re-entered before the period is acknowledged.
+ */
 static irqreturn_t mt8163_afe_irq(int irq, void *data)
 {
 	struct mt8163_afe *afe = data;
-	struct snd_pcm_substream *substream = NULL;
-	unsigned long flags;
 	unsigned int status;
 
 	if (regmap_read(afe->regmap, AFE_IRQ_STATUS, &status))
@@ -722,6 +732,15 @@ static irqreturn_t mt8163_afe_irq(int irq, void *data)
 		return IRQ_NONE;
 
 	regmap_write(afe->regmap, AFE_IRQ_CLR, AFE_IRQ1_ENABLE);
+	return IRQ_WAKE_THREAD;
+}
+
+static irqreturn_t mt8163_afe_irq_thread(int irq, void *data)
+{
+	struct mt8163_afe *afe = data;
+	struct snd_pcm_substream *substream = NULL;
+	unsigned long flags;
+
 	spin_lock_irqsave(&afe->irq_lock, flags);
 	if (afe->running)
 		substream = afe->substream;
@@ -1218,8 +1237,9 @@ static int mt8163_afe_probe(struct platform_device *pdev)
 	afe->irq = platform_get_irq(pdev, 0);
 	if (afe->irq < 0)
 		return afe->irq;
-	ret = devm_request_irq(dev, afe->irq, mt8163_afe_irq, 0,
-			       "mt8163-afe", afe);
+	ret = devm_request_threaded_irq(dev, afe->irq, mt8163_afe_irq,
+					mt8163_afe_irq_thread, IRQF_ONESHOT,
+					"mt8163-afe", afe);
 	if (ret)
 		return ret;
 

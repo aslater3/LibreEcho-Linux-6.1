@@ -64,12 +64,37 @@ jobs:
           echo "gate: reason=$reason changed_files=$file_count run_build=$run_build"
           echo "run_build=$run_build" >> "$GITHUB_OUTPUT"
 
-  arm32_kernel:
-    name: ARM32 kernel build and regression checks
+  target_table:
+    name: Validate targets and plan build matrix
     needs: docs_gate
     if: needs.docs_gate.outputs.run_build == 'true'
     runs-on: ubuntu-24.04
+    outputs:
+      build_matrix: ${{ steps.targets.outputs.build_matrix }}
+      publish_matrix: ${{ steps.targets.outputs.publish_matrix }}
+    steps:
+      - name: Check out Linux source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - name: Run target-table regression tests
+        run: python3 -B libreecho/test_targets.py
+      - name: Validate sources and emit deduplicated matrices
+        id: targets
+        run: python3 -B libreecho/validate_targets.py --github-output "$GITHUB_OUTPUT"
+
+  arm32_kernel:
+    name: ARM32 kernel build and regression checks (${{ matrix.target }})
+    needs: [docs_gate, target_table]
+    if: needs.docs_gate.outputs.run_build == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.target_table.outputs.build_matrix) }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
+    env:
+      KERNEL_DEFCONFIG: ${{ matrix.defconfig }}
+      KERNEL_DTB: ${{ matrix.dtb }}
     steps:
       - name: Check out Linux source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -89,23 +114,51 @@ jobs:
       - name: Run MT8163 console diag contract
         run: python3 drivers/usb/musb/test_mt8163_console_diag_contract.py
 
+      - name: Run MT8163 role-switch contract
+        run: python3 drivers/usb/musb/test_mt8163_role_switch_contract.py
+
+      - name: Run amz_privacy atomic-context contract
+        run: python3 drivers/misc/test_amz_privacy_atomic_context.py
+
+      - name: Run Radar-Puffin keypad contract
+        run: python3 drivers/misc/test_libreecho_radar_puffin_keys.py
       - name: Run IS31FL32xx LED init contract
         run: python3 drivers/leds/test_is31fl32xx_init_contract.py
 
       - name: Run MT8163 MCLK pinctrl contract
         run: python3 sound/soc/mediatek/mt8163/test_mt8163_mclk_pinctrl_contract.py
 
+      - name: Run MT8163 AFE period IRQ atomic contract
+        run: python3 sound/soc/mediatek/mt8163/test_mt8163_afe_irq_atomic_contract.py
+
+      - name: Run Radar-Puffin PCM volume preservation contract
+        run: python3 sound/soc/mediatek/mt8163/test_radar_puffin_volume_preservation.py
+
+      - name: Run Radar-Puffin speaker codec profile contract
+        run: python3 sound/soc/mediatek/mt8163/test_radar_puffin_speaker_profile.py
+
       - name: Run MT8163 pstore source contract
         run: python3 tools/mt8163_pstore_contract_test.py
+
+      - name: Run IDME factory MAC contract
+        run: python3 drivers/misc/mediatek/mt8163-connectivity/test_idme_factory_mac_contract.py
 
       - name: Run WEXT and cfg80211 regression contract
         run: python3 drivers/misc/mediatek/mt8163-connectivity/test_wext_cfg80211_fallback.py
 
+      - name: Run Radar-Puffin thermal policy contract
+        run: python3 drivers/thermal/test_amazon_thermistor_policy_contract.py
       - name: Run Wi-Fi state convergence contract
         run: python3 drivers/misc/mediatek/mt8163-connectivity/test_wifi_state_reporting_contract.py
 
       - name: Run pstore ramoops contract
         run: python3 tools/mt8163_pstore_ramoops_contract_test.py
+
+      - name: Run Radar-Puffin mute lamp contract
+        run: python3 tools/mt8163_mute_lamp_contract_test.py
+
+      - name: Run procfs map_files NULL mm contract
+        run: python3 fs/proc/test_proc_map_files_null_mm_contract.py
 
       - name: Configure and build kernel
         shell: bash
@@ -113,26 +166,108 @@ jobs:
           set -euo pipefail
           out="$RUNNER_TEMP/kernel-out"
           make O="$out" ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- \
-            LD=arm-linux-gnueabihf-ld.bfd mt8163_arm32_defconfig
+            LD=arm-linux-gnueabihf-ld.bfd "$KERNEL_DEFCONFIG"
           make O="$out" ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- \
             LD=arm-linux-gnueabihf-ld.bfd olddefconfig
           make -j2 O="$out" ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- \
             LD=arm-linux-gnueabihf-ld.bfd zImage dtbs
           test -s "$out/arch/arm/boot/zImage"
-          test -s "$out/arch/arm/boot/dts/libreecho-radar-puffin.dtb"
+          test -s "$out/arch/arm/boot/dts/$KERNEL_DTB"
           test -s "$out/System.map"
           grep -qx 'CONFIG_CFG80211_WEXT=y' "$out/.config"
+          # The MUSB role is a Kconfig choice, so it can be re-resolved by
+          # olddefconfig.  Gadget-only makes mtk_musb_probe() overwrite the
+          # device tree's dr_mode with USB_DR_MODE_PERIPHERAL, which drops the
+          # host objects and the OTG role switch: host mode then cannot be
+          # selected at all.  Assert the resolved config, not the defconfig.
+          grep -qx 'CONFIG_USB_MUSB_DUAL_ROLE=y' "$out/.config"
+          ! grep -qx 'CONFIG_USB_MUSB_GADGET=y' "$out/.config"
           git diff --check
 
       - name: Upload kernel build outputs
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: libreecho-linux-arm32-${{ github.sha }}-${{ matrix.target }}
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 14
+          path: |
+            ${{ runner.temp }}/kernel-out/arch/arm/boot/zImage
+            ${{ runner.temp }}/kernel-out/arch/arm/boot/dts/${{ matrix.dtb }}
+            ${{ runner.temp }}/kernel-out/System.map
+            ${{ runner.temp }}/kernel-out/.config
+
+  target_artifacts:
+    name: Publish kernel artifacts (${{ matrix.target }})
+    needs: [target_table, arm32_kernel]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.target_table.outputs.publish_matrix) }}
+    runs-on: ubuntu-24.04
+    env:
+      KERNEL_DTB: ${{ matrix.dtb }}
+    steps:
+      # Identical tuples download the same immutable build artifact. Publication
+      # does not rebuild or alter kernel bytes; a divergent tuple gets a new lane.
+      - name: Download this target's canonical build
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: libreecho-linux-arm32-${{ github.sha }}-${{ matrix.build_target }}
+          path: ${{ runner.temp }}/kernel-artifacts
+
+      - name: Require complete build outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/kernel-artifacts"
+          test -s "$out/arch/arm/boot/zImage"
+          test -s "$out/arch/arm/boot/dts/$KERNEL_DTB"
+          test -s "$out/System.map"
+          test -s "$out/.config"
+
+      - name: Upload target kernel image
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: libreecho-kernel-${{ matrix.target }}-zImage
+          if-no-files-found: error
+          retention-days: 14
+          path: ${{ runner.temp }}/kernel-artifacts/arch/arm/boot/zImage
+
+      - name: Upload target DTB
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: libreecho-kernel-${{ matrix.target }}-dtb
+          if-no-files-found: error
+          retention-days: 14
+          path: ${{ runner.temp }}/kernel-artifacts/arch/arm/boot/dts/${{ matrix.dtb }}
+
+      - name: Upload target symbol map
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: libreecho-kernel-${{ matrix.target }}-System.map
+          if-no-files-found: error
+          retention-days: 14
+          path: ${{ runner.temp }}/kernel-artifacts/System.map
+
+      - name: Upload target resolved configuration
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: libreecho-kernel-${{ matrix.target }}-config
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 14
+          path: ${{ runner.temp }}/kernel-artifacts/.config
+
+      - name: Retain legacy Radar artifact bundle
+        if: matrix.target == 'radar_puffin'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: libreecho-linux-arm32-${{ github.sha }}
           if-no-files-found: error
           include-hidden-files: true
           retention-days: 14
           path: |
-            ${{ runner.temp }}/kernel-out/arch/arm/boot/zImage
-            ${{ runner.temp }}/kernel-out/arch/arm/boot/dts/libreecho-radar-puffin.dtb
-            ${{ runner.temp }}/kernel-out/System.map
-            ${{ runner.temp }}/kernel-out/.config
+            ${{ runner.temp }}/kernel-artifacts/arch/arm/boot/zImage
+            ${{ runner.temp }}/kernel-artifacts/arch/arm/boot/dts/${{ matrix.dtb }}
+            ${{ runner.temp }}/kernel-artifacts/System.map
+            ${{ runner.temp }}/kernel-artifacts/.config

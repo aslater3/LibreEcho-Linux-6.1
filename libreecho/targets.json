@@ -1,0 +1,10 @@
+{
+  "radar_puffin": {
+    "defconfig": "mt8163_arm32_defconfig",
+    "dtb": "libreecho-radar-puffin.dtb"
+  },
+  "biscuit": {
+    "defconfig": "mt8163_arm32_defconfig",
+    "dtb": "libreecho-radar-puffin.dtb"
+  }
+}

@@ -56,14 +56,40 @@ Use an external output directory, for example:
 
 ```sh
 make O=/path/to/kernel-output ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- \
-  libreecho_mt8163_audio_defconfig
+  LD=arm-linux-gnueabihf-ld.bfd mt8163_arm32_defconfig
 make O=/path/to/kernel-output ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- \
-  zImage dtbs -j8
+  LD=arm-linux-gnueabihf-ld.bfd olddefconfig
+make O=/path/to/kernel-output ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- \
+  LD=arm-linux-gnueabihf-ld.bfd zImage dtbs -j8
 ```
 
 The final LibreEcho pipeline remains the authority for the stock-v184 Android
 boot envelope, initramfs, feature payloads, signing, and image verification.
 This repository must not be used to flash a device directly.
+
+## Kernel target scaffolding
+
+`libreecho/targets.json` maps `radar_puffin` and `biscuit` to their kernel
+`defconfig` and `dtb`. Both currently use `mt8163_arm32_defconfig` and
+`libreecho-radar-puffin.dtb`: this is deliberate build parity, **not Biscuit
+hardware acceptance**. Biscuit will get its own reviewed DTS and hardware
+validation in a later change; no new DTS or audio/config fragments are added here.
+
+Validate the table and exercise its CI planner without hardware:
+
+```sh
+python3 -B libreecho/validate_targets.py
+python3 -B libreecho/test_targets.py
+```
+
+CI reads this table, builds each distinct `(defconfig, dtb)` tuple once, then
+uses a publication matrix over both targets to upload
+`libreecho-kernel-<target>-zImage`, `-dtb`, `-System.map` and `-config` artifacts.
+At parity these are copies of the same build outputs. The legacy Radar bundle
+`libreecho-linux-arm32-<sha>` is also retained. Changing Biscuit's tuple to valid
+in-tree sources adds a build lane automatically; unknown IDs or missing sources
+fail validation. The build still uses `olddefconfig`, `zImage dtbs`, the existing
+ARMHF GCC/linker flags and no config fragments, preserving Radar's CI recipe.
 
 ## MT8163 pstore/ramoops source boundary
 

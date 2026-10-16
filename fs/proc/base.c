@@ -2344,8 +2344,13 @@ static struct dentry *proc_map_files_lookup(struct inode *dir,
 		goto out_put_task;
 
 	mm = mm_access(task, PTRACE_MODE_READ_FSCREDS);
-	if (IS_ERR(mm)) {
-		result = ERR_CAST(mm);
+	if (IS_ERR_OR_NULL(mm)) {
+		/*
+		 * mm_access() reports a task without an mm (a kernel thread, or
+		 * an mm torn down during exit) as NULL, not as an error pointer.
+		 * No mapping can exist in that case.
+		 */
+		result = IS_ERR(mm) ? ERR_CAST(mm) : ERR_PTR(-ENOENT);
 		goto out_put_task;
 	}
 
@@ -2402,11 +2407,14 @@ proc_map_files_readdir(struct file *file, struct dir_context *ctx)
 		goto out_put_task;
 
 	mm = mm_access(task, PTRACE_MODE_READ_FSCREDS);
-	if (IS_ERR(mm)) {
-		ret = PTR_ERR(mm);
-		/* if the task has no mm, the directory should just be empty */
-		if (ret == -ESRCH)
-			ret = 0;
+	if (IS_ERR_OR_NULL(mm)) {
+		/*
+		 * mm_access() reports a task without an mm (a kernel thread, or
+		 * an mm torn down during exit) as NULL, not as an error pointer,
+		 * so IS_ERR() alone is not enough here.  There are no mappings
+		 * to report in that case: the directory is simply empty.
+		 */
+		ret = IS_ERR(mm) ? PTR_ERR(mm) : 0;
 		goto out_put_task;
 	}
 
