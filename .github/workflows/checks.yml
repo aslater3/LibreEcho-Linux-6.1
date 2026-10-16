@@ -17,7 +17,7 @@ concurrency:
 jobs:
   docs_gate:
     name: Documentation-only change gate
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     outputs:
       run_build: ${{ steps.detect.outputs.run_build }}
     steps:
@@ -68,7 +68,7 @@ jobs:
     name: Validate targets and plan build matrix
     needs: docs_gate
     if: needs.docs_gate.outputs.run_build == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     outputs:
       build_matrix: ${{ steps.targets.outputs.build_matrix }}
       publish_matrix: ${{ steps.targets.outputs.publish_matrix }}
@@ -90,7 +90,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.target_table.outputs.build_matrix) }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 90
     env:
       KERNEL_DEFCONFIG: ${{ matrix.defconfig }}
@@ -203,7 +203,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.target_table.outputs.publish_matrix) }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     env:
       KERNEL_DTB: ${{ matrix.dtb }}
     steps:
