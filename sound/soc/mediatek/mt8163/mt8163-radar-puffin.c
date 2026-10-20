@@ -854,7 +854,9 @@ static int radar_speaker_hw_params(struct snd_pcm_substream *substream,
 	radar_log_codec_state(codec_dai->component, "machine-hw_params-entry");
 	if (params_rate(params) != 48000 ||
 	    params_channels(params) != 2 ||
-	    params_format(params) != SNDRV_PCM_FORMAT_S16_LE) {
+	    (params_format(params) != SNDRV_PCM_FORMAT_S16_LE &&
+	     params_format(params) != SNDRV_PCM_FORMAT_S24_LE &&
+	     params_format(params) != SNDRV_PCM_FORMAT_S32_LE)) {
 		dev_err(codec_dai->dev,
 			"Radar-Puffin speaker requires duplicated-stereo PCM: "
 			"rate=%u channels=%u format=%u\n",
