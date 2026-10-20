@@ -79,6 +79,12 @@
 #define AFE_I2S_RATE_MASK		GENMASK(11, 8)
 #define AFE_DL1_MONO			BIT(21)
 #define AFE_DL1_FORMAT_MASK		GENMASK(17, 16)
+/* DL1 fetch format (3.18 SetMemIfFetchFormatPerSample): 16-bit, 24 bits in
+ * the low bits of a 32-bit word (S24_LE), or 24 bits in the high bits with a
+ * zero low byte (S32_LE). */
+#define AFE_DL1_FORMAT_16BIT		0
+#define AFE_DL1_FORMAT_24BIT_LSB	(1 << 16)
+#define AFE_DL1_FORMAT_24BIT_MSB	(3 << 16)
 #define AFE_IRQ1_ENABLE			BIT(0)
 #define AFE_I2S_ENABLE			BIT(0)
 #define AFE_I2S_FORMAT_I2S		BIT(3)
@@ -128,6 +134,9 @@
 #define MT8163_PCM_RATE			48000
 #define MT8163_PCM_BUFFER_MAX		0x6000
 #define MT8163_PCM_ALIGN			64
+#define MT8163_PCM_FORMATS		(SNDRV_PCM_FMTBIT_S16_LE | \
+					 SNDRV_PCM_FMTBIT_S24_LE | \
+					 SNDRV_PCM_FMTBIT_S32_LE)
 
 enum mt8163_pin {
 	MT8163_PIN_PMIC_IDLE,
@@ -188,7 +197,7 @@ struct mt8163_afe {
 
 static const struct snd_pcm_hardware mt8163_pcm_hardware = {
 	.info = SNDRV_PCM_INFO_INTERLEAVED | SNDRV_PCM_INFO_BLOCK_TRANSFER,
-	.formats = SNDRV_PCM_FMTBIT_S16_LE,
+	.formats = MT8163_PCM_FORMATS,
 	.rates = SNDRV_PCM_RATE_48000,
 	.rate_min = MT8163_PCM_RATE,
 	.rate_max = MT8163_PCM_RATE,
@@ -558,7 +567,18 @@ static int mt8163_afe_preserve_error(struct mt8163_afe *afe, int primary,
  * bridge that feeds that output.  The 6.1 candidate originally programmed
  * only DL1 and I2S_OUT_2's format, leaving the latter stage gated and muted.
  */
-static int mt8163_afe_i2s_dac_config(struct mt8163_afe *afe)
+static bool mt8163_pcm_format_wide(snd_pcm_format_t format)
+{
+	return format == SNDRV_PCM_FORMAT_S24_LE ||
+	       format == SNDRV_PCM_FORMAT_S32_LE;
+}
+
+/*
+ * 16-bit streams keep the 3.18 oracle's 16-bit internal DAC words; 24-bit
+ * streams use 32-bit words there too, as 3.18 does for its 24-bit path.  The
+ * external I2S_OUT_2 slots are 32-bit either way (BCLK = 64 fs).
+ */
+static int mt8163_afe_i2s_dac_config(struct mt8163_afe *afe, bool wide)
 {
 	int first = 0;
 	int ret;
@@ -576,6 +596,7 @@ static int mt8163_afe_i2s_dac_config(struct mt8163_afe *afe)
 	mt8163_afe_record_error(&first, ret);
 	ret = regmap_write(afe->regmap, AFE_I2S_CON1,
 			   AFE_I2S_DAC_CONFIG |
+			   (wide ? AFE_I2S_WORD_32 : 0) |
 			   (afe->low_jitter ? AFE_I2S_LOW_JITTER : 0));
 	mt8163_afe_record_error(&first, ret);
 
@@ -825,7 +846,8 @@ static int mt8163_pcm_hw_params(struct snd_soc_component *component,
 
 	if (params_rate(params) != MT8163_PCM_RATE ||
 	    params_channels(params) < 1 || params_channels(params) > 2 ||
-	    params_format(params) != SNDRV_PCM_FORMAT_S16_LE ||
+	    (params_format(params) != SNDRV_PCM_FORMAT_S16_LE &&
+	     !mt8163_pcm_format_wide(params_format(params))) ||
 	    !bytes || bytes > afe->sram_size ||
 	    bytes > MT8163_PCM_BUFFER_MAX ||
 	    !IS_ALIGNED(bytes, MT8163_PCM_ALIGN))
@@ -847,6 +869,12 @@ static int mt8163_pcm_prepare(struct snd_soc_component *component,
 			       AFE_I2S_FORMAT_I2S | AFE_I2S_WORD_32 |
 			       (afe->low_jitter ? AFE_I2S_LOW_JITTER : 0);
 	bool mono = substream->runtime->channels == 1;
+	snd_pcm_format_t format = substream->runtime->format;
+	bool wide = mt8163_pcm_format_wide(format);
+	unsigned int fetch = format == SNDRV_PCM_FORMAT_S32_LE ?
+			     AFE_DL1_FORMAT_24BIT_MSB :
+			     format == SNDRV_PCM_FORMAT_S24_LE ?
+			     AFE_DL1_FORMAT_24BIT_LSB : AFE_DL1_FORMAT_16BIT;
 	int safe_ret;
 	int ret;
 
@@ -873,7 +901,7 @@ static int mt8163_pcm_prepare(struct snd_soc_component *component,
 		goto safe;
 
 	ret = regmap_update_bits(afe->regmap, AFE_MEMIF_PBUF_SIZE,
-				 AFE_DL1_FORMAT_MASK, 0);
+				 AFE_DL1_FORMAT_MASK, fetch);
 	if (ret)
 		goto safe;
 	ret = regmap_update_bits(afe->regmap, AFE_DAC_CON1,
@@ -891,10 +919,11 @@ static int mt8163_pcm_prepare(struct snd_soc_component *component,
 	if (ret)
 		goto safe;
 	ret = regmap_update_bits(afe->regmap, AFE_CONN_24BIT,
-				 AFE_OUTPUT_FORMAT_24BIT_MASK, 0);
+				 AFE_OUTPUT_FORMAT_24BIT_MASK,
+				 wide ? AFE_OUTPUT_FORMAT_24BIT_MASK : 0);
 	if (ret)
 		goto safe;
-	ret = mt8163_afe_i2s_dac_config(afe);
+	ret = mt8163_afe_i2s_dac_config(afe, wide);
 	if (ret)
 		goto safe;
 	ret = regmap_write(afe->regmap, AFE_I2S_CON3, i2s_ext);
@@ -1082,7 +1111,7 @@ static struct snd_soc_dai_driver mt8163_afe_dai = {
 		.channels_min = 1,
 		.channels_max = 2,
 		.rates = SNDRV_PCM_RATE_48000,
-		.formats = SNDRV_PCM_FMTBIT_S16_LE,
+		.formats = MT8163_PCM_FORMATS,
 	},
 };
 

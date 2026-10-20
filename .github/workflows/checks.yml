@@ -137,6 +137,9 @@ jobs:
       - name: Run Radar-Puffin speaker codec profile contract
         run: python3 sound/soc/mediatek/mt8163/test_radar_puffin_speaker_profile.py
 
+      - name: Run MT8163 24-bit speaker playback contract
+        run: python3 sound/soc/mediatek/mt8163/test_mt8163_wide_playback_contract.py
+
       - name: Run MT8163 pstore source contract
         run: python3 tools/mt8163_pstore_contract_test.py
 
