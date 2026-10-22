@@ -124,6 +124,8 @@ jobs:
         run: python3 drivers/misc/test_libreecho_radar_puffin_keys.py
       - name: Run IS31FL32xx LED init contract
         run: python3 drivers/leds/test_is31fl32xx_init_contract.py
+      - name: Run IS31FL3236 current-scaled frame contract
+        run: python3 drivers/leds/test_is31fl3236_scaled_frame_contract.py
 
       - name: Run MT8163 MCLK pinctrl contract
         run: python3 sound/soc/mediatek/mt8163/test_mt8163_mclk_pinctrl_contract.py
