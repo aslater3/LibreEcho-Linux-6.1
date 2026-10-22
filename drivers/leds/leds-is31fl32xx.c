@@ -48,6 +48,8 @@ struct is31fl32xx_priv {
 	struct mutex frame_lock;
 	u8 channel_offset;
 	u8 frame[36];
+	u8 scale[36];		/* per-channel output current: Imax/(scale+1) */
+	bool scale_valid;	/* scale[] matches the latched LED control regs */
 	bool boot_animation;
 	struct is31fl32xx_led_data leds[];
 };
@@ -355,27 +357,57 @@ static int is31fl32xx_init_regs(struct is31fl32xx_priv *priv)
  * LibreEcho's userspace renders the 12 RGB pixels atomically.  Keep this
  * board-specific interface on the I2C device while retaining the standard
  * per-channel LED class interface for DTs that describe child LEDs.
+ *
+ * Each IS31FL3236 output also has a current setting in its LED control
+ * register (SL bits: Imax, Imax/2, Imax/3, Imax/4).  The 8-bit PWM alone gives
+ * only a couple of usable steps at sleep-light brightness, so the scaled frame
+ * lets userspace pick PWM and current together per channel.  The chip latches
+ * PWM and LED control registers on the same Update write, so a scale change
+ * never shows a mismatched intermediate frame.
  */
+#define IS31FL3236_CTRL_OUT_ON		BIT(0)
+#define IS31FL3236_CTRL_SL_SHIFT	1
+#define IS31FL3236_SCALE_MAX		3
+
 static int is31fl3236_update_frame(struct is31fl32xx_priv *priv,
-				   const u8 *frame)
+				   const u8 *frame, const u8 *scale)
 {
+	const struct is31fl32xx_chipdef *cdef = priv->cdef;
 	unsigned int i;
 	int ret;
 
 	for (i = 0; i < ARRAY_SIZE(priv->frame); i++) {
 		u8 channel = (i + priv->channel_offset) % ARRAY_SIZE(priv->frame);
 
+		if (priv->scale_valid && priv->scale[i] == scale[i])
+			continue;
+		/* Until the Update write lands the cache no longer matches. */
+		priv->scale_valid = false;
 		ret = is31fl32xx_write(priv,
-				       priv->cdef->pwm_register_base + channel,
+				       cdef->led_control_register_base + channel,
+				       IS31FL3236_CTRL_OUT_ON |
+				       (scale[i] << IS31FL3236_CTRL_SL_SHIFT));
+		if (ret)
+			return ret;
+	}
+
+	for (i = 0; i < ARRAY_SIZE(priv->frame); i++) {
+		u8 channel = (i + priv->channel_offset) % ARRAY_SIZE(priv->frame);
+
+		ret = is31fl32xx_write(priv,
+				       cdef->pwm_register_base + channel,
 				       frame[i]);
 		if (ret)
 			return ret;
 	}
 
-	ret = is31fl32xx_write(priv, priv->cdef->pwm_update_reg, 0);
-	if (!ret)
-		memcpy(priv->frame, frame, sizeof(priv->frame));
-	return ret;
+	ret = is31fl32xx_write(priv, cdef->pwm_update_reg, 0);
+	if (ret)
+		return ret;
+	memcpy(priv->frame, frame, sizeof(priv->frame));
+	memcpy(priv->scale, scale, sizeof(priv->scale));
+	priv->scale_valid = true;
+	return 0;
 }
 
 static ssize_t frame_show(struct device *dev, struct device_attribute *attr,
@@ -393,28 +425,83 @@ static ssize_t frame_show(struct device *dev, struct device_attribute *attr,
 	return len;
 }
 
+/* Parse exactly @len bytes of hex, allowing one trailing newline. */
+static int is31fl3236_parse_hex(const char *buf, size_t count, u8 *out,
+				size_t len)
+{
+	size_t hex_len = count;
+
+	if (hex_len && buf[hex_len - 1] == '\n')
+		hex_len--;
+	if (hex_len != len * 2)
+		return -EINVAL;
+	return hex2bin(out, buf, len);
+}
+
+/* Legacy 36-byte PWM frame: every channel at full current. */
 static ssize_t frame_store(struct device *dev, struct device_attribute *attr,
 			   const char *buf, size_t count)
 {
 	struct is31fl32xx_priv *priv = dev_get_drvdata(dev);
 	u8 frame[ARRAY_SIZE(priv->frame)];
-	size_t hex_len = count;
+	static const u8 full[ARRAY_SIZE(priv->scale)];
 	int ret;
 
-	if (hex_len && buf[hex_len - 1] == '\n')
-		hex_len--;
-	if (hex_len != sizeof(frame) * 2)
-		return -EINVAL;
-	ret = hex2bin(frame, buf, sizeof(frame));
+	ret = is31fl3236_parse_hex(buf, count, frame, sizeof(frame));
 	if (ret)
 		return ret;
 
 	mutex_lock(&priv->frame_lock);
-	ret = is31fl3236_update_frame(priv, frame);
+	ret = is31fl3236_update_frame(priv, frame, full);
 	mutex_unlock(&priv->frame_lock);
 	return ret ? ret : count;
 }
 static DEVICE_ATTR_RW(frame);
+
+/*
+ * scaled_frame: 36 PWM bytes followed by 36 current-scale bytes, as 144 hex
+ * characters.  Scale n drives the channel at Imax/(n+1), n = 0..3.
+ */
+static ssize_t scaled_frame_show(struct device *dev,
+				 struct device_attribute *attr, char *buf)
+{
+	struct is31fl32xx_priv *priv = dev_get_drvdata(dev);
+	ssize_t len;
+
+	mutex_lock(&priv->frame_lock);
+	bin2hex(buf, priv->frame, sizeof(priv->frame));
+	len = sizeof(priv->frame) * 2;
+	bin2hex(buf + len, priv->scale, sizeof(priv->scale));
+	len += sizeof(priv->scale) * 2;
+	buf[len++] = '\n';
+	buf[len] = '\0';
+	mutex_unlock(&priv->frame_lock);
+	return len;
+}
+
+static ssize_t scaled_frame_store(struct device *dev,
+				  struct device_attribute *attr,
+				  const char *buf, size_t count)
+{
+	struct is31fl32xx_priv *priv = dev_get_drvdata(dev);
+	u8 data[ARRAY_SIZE(priv->frame) + ARRAY_SIZE(priv->scale)];
+	const u8 *scale = data + ARRAY_SIZE(priv->frame);
+	unsigned int i;
+	int ret;
+
+	ret = is31fl3236_parse_hex(buf, count, data, sizeof(data));
+	if (ret)
+		return ret;
+	for (i = 0; i < ARRAY_SIZE(priv->scale); i++)
+		if (scale[i] > IS31FL3236_SCALE_MAX)
+			return -EINVAL;
+
+	mutex_lock(&priv->frame_lock);
+	ret = is31fl3236_update_frame(priv, data, scale);
+	mutex_unlock(&priv->frame_lock);
+	return ret ? ret : count;
+}
+static DEVICE_ATTR_RW(scaled_frame);
 
 static ssize_t boot_animation_show(struct device *dev,
 				   struct device_attribute *attr, char *buf)
@@ -443,6 +530,7 @@ static DEVICE_ATTR_RW(boot_animation);
 
 static struct attribute *is31fl3236_attrs[] = {
 	&dev_attr_frame.attr,
+	&dev_attr_scaled_frame.attr,
 	&dev_attr_boot_animation.attr,
 	NULL,
 };
