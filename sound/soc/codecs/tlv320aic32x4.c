@@ -61,8 +61,10 @@ struct aic32x4_priv {
 };
 
 #define AIC32X4_GAIN_APPLIED		AIC32X4_REG(1, 63)
-#define AIC32X4_GAIN_APPLIED_POLL_MS	100
-#define AIC32X4_GAIN_APPLIED_RETRIES	22
+/* Poll the gain-applied flag finely: playback starts as soon as the codec
+ * has applied the gain, not on the next 100 ms tick. Same 2.2 s ceiling. */
+#define AIC32X4_GAIN_APPLIED_POLL_US	5000
+#define AIC32X4_GAIN_APPLIED_RETRIES	440
 #define AIC32X4_GAIN_APPLIED_MONO	BIT(6)
 #define AIC32X4_GAIN_APPLIED_STEREO	(BIT(7) | BIT(6))
 
@@ -1708,7 +1710,8 @@ static int aic32x4_apply_playback_mute(struct snd_soc_component *component,
 		return aic32x4_playback_fail_closed(component, status);
 	while ((status & gain_ready_mask) != gain_ready_mask &&
 	       retry < AIC32X4_GAIN_APPLIED_RETRIES) {
-		msleep(AIC32X4_GAIN_APPLIED_POLL_MS);
+		usleep_range(AIC32X4_GAIN_APPLIED_POLL_US,
+			     AIC32X4_GAIN_APPLIED_POLL_US + 1000);
 		status = snd_soc_component_read(component, AIC32X4_GAIN_APPLIED);
 		if (status < 0)
 			return aic32x4_playback_fail_closed(component, status);
